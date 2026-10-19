@@ -79,7 +79,9 @@ for (const spec of list.arenas) {
     ...(farNames.length ? [textureCompress({ encoder: sharp, targetFormat: 'webp', resize: [512, 512], quality: 85, effort: 90, pattern: new RegExp(`^(${farNames.map(esc).join('|')})$`) })] : []),
     textureCompress({ encoder: sharp, targetFormat: 'webp', resize: [1024, 1024], quality: 85, effort: 90, formats: /png/ }),
     reorder({ encoder: MeshoptEncoder }),
-    quantize(),
+    // One quantisation volume for the whole arena: per-mesh volumes round shared edges of two materials
+    // differently, and the floor shows hairline cracks along them. 16 bits over ~160 m is 2.4 mm.
+    quantize({ quantizationVolume: 'scene', quantizePosition: 16 }),
   );
   doc.createExtension(EXTMeshoptCompression).setRequired(true).setEncoderOptions({ method: EXTMeshoptCompression.EncoderMethod.QUANTIZE });
   const glb = Buffer.from(await io.writeBinary(doc));

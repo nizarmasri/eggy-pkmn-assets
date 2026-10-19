@@ -192,10 +192,11 @@
       camera.near = 0.45 * shot.pos.distanceTo(near);
     } else if (view === 'overview') {
       camera.up.set(0, 1, 0);
-      camera.near = 0.05;
       camera.fov = 50;
       const R = Math.max(size.x, size.z) * 0.5;
       const r = Math.max(6, Math.min(R, (meta.radius || D) * 3));
+      // A near plane in proportion to the distance, so coplanar floor layers do not fight from afar.
+      camera.near = Math.max(0.05, r * 0.02);
       camera.position.set(r * 1.1, r * 0.9, -r * 1.1);
       camera.lookAt(0, 0, 0);
     } else {
