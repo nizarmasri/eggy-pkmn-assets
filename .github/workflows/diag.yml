@@ -36,6 +36,8 @@ env:
   PME_SHA: 84ec1e58c0fbb9a0dc7a2bf36b618e853ae2328a
   MEGA_CACHE: ${{ github.workspace }}/cache
   ASM_URL: https://github.com/aelurum/AssetStudio/releases/download/v0.19.0/AssetStudioModCLI_net9_linux64.zip
+  ASM_REPO: https://github.com/aelurum/AssetStudio.git
+  ASM_SHA: 6de33d04379828abfcd35e0965b23d03b88f4751
   FBX2GLTF_URL: https://github.com/godotengine/FBX2glTF/releases/download/v0.13.1/FBX2glTF-linux-x86_64.zip
 
 jobs:
@@ -175,6 +177,7 @@ jobs:
           key: bdsp-src-${{ github.run_id }}
       - name: The Unity path on the asked folders
         run: |
+          shopt -s nullglob
           mkdir -p diag tools
           a="${{ steps.get.outputs.file }}"
           curl -fsSL "$ASM_URL" -o tools/asm.zip && unzip -q tools/asm.zip -d tools/asm
@@ -182,6 +185,15 @@ jobs:
           cli=$(find tools/asm -type f -name AssetStudioModCLI | head -1)
           fbx=$(find tools/fbx -type f -name 'FBX2glTF-*' -not -name '*.txt' | head -1)
           chmod +x "$cli" "$fbx"
+          # The same CLI built from its tag with AnimationClip among the types animator mode reads.
+          git init -q tools/asm-src
+          git -C tools/asm-src fetch -q --depth 1 "$ASM_REPO" "$ASM_SHA"
+          git -C tools/asm-src checkout -q FETCH_HEAD
+          o=tools/asm-src/AssetStudioCLI/Options/CLIOptions.cs
+          perl -0pi -e 's/(ClassIDType\.Animator,\s*ClassIDType\.Mesh,\s*ClassIDType\.Texture2D,)/$1\n                            ClassIDType.AnimationClip,/' "$o"
+          grep -n -A4 'ClassIDType.Animator,$' "$o" | head -8
+          dotnet build tools/asm-src/AssetStudioCLI/AssetStudioCLI.csproj -c Release -f net9.0 -r linux-x64 --self-contained false -o tools/asm-build --nologo -clp:ErrorsOnly
+          cp tools/asm-build/AssetStudioModCLI.dll "$(dirname "$cli")/"
           pipeline/bdsp/extract.sh "$a" work/bdsp work/out "$cli" "$fbx" ${{ inputs.bdsp }}
           for g in $(find work/out -name '*.glb'); do node pipeline/bdsp/inspect.mjs "$g"; done > diag/bdsp-glb.txt 2>&1 || true
           grep -v '^      ' diag/bdsp-glb.txt | head -200
@@ -189,7 +201,7 @@ jobs:
             n=$(basename "$d")
             cp "$d/$n.glb" diag/ 2>/dev/null || true
             (cd "$d" && ls -la) > "diag/bdsp-files-$n.txt"
-            for f in "$d"/*.log "$d"/*.json; do if [ -f "$f" ]; then cp "$f" "diag/bdsp-$n-$(basename "$f")"; fi; done
+            for f in "$d"/*.log; do if [ -f "$f" ]; then cp "$f" "diag/bdsp-$n-$(basename "$f")"; fi; done
           done
       - uses: actions/upload-artifact@v4
         if: always()

@@ -608,17 +608,17 @@ namespace Eggy.Conv
             {
                 if (entry["role"] != null || entry["alpha"]?.GetValue<string>() != "BLEND") continue;
                 string name = entry["name"].GetValue<string>();
-                float up = 0, all = 0;
+                float up = 0, total = 0;
                 foreach (var mesh in b.Model.Meshes)
                     foreach (var sub in mesh.SubMeshes.Where(x => x.Material == name))
                         for (int t = 0; t + 2 < sub.Indices.Length; t += 3)
                         {
                             var n = Vector3.Cross(mesh.Positions[sub.Indices[t + 1]] - mesh.Positions[sub.Indices[t]], mesh.Positions[sub.Indices[t + 2]] - mesh.Positions[sub.Indices[t]]);
                             float area = n.Length();
-                            all += area;
+                            total += area;
                             if (area > 0 && Math.Abs(n.Y) / area > 0.9f) up += area;
                         }
-                if (all > 0 && up / all > 0.9f) entry["role"] = "decal";
+                if (total > 0 && up / total > 0.9f) entry["role"] = "decal";
             }
 
             // ---- The GLB ----
