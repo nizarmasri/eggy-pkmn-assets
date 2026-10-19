@@ -5,6 +5,7 @@
 //
 //   node pipeline/ids.mjs <p1 ids.json> <out ids.json>
 import fs from 'node:fs';
+import path from 'node:path';
 
 // Species with forms: the forms in the games' own order. A species' first form lives in folder 11, the
 // next in 12, and so on (pm0479_11_00 is Rotom, pm0479_13_00 Rotom-Wash). "" is the base sprite id.
@@ -68,6 +69,7 @@ export function buildIds(p1) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [inPath, outPath] = process.argv.slice(2);
   const ids = buildIds(JSON.parse(fs.readFileSync(inPath, 'utf8')));
+  fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
   fs.writeFileSync(outPath, JSON.stringify(ids, null, 1) + '\n');
   const by = {};
   for (const e of ids) by[e.why] = (by[e.why] ?? 0) + 1;

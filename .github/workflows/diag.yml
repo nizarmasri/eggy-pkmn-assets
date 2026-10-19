@@ -14,8 +14,8 @@ on:
         description: Ids to convert with diagnostics (regex)
         default: '^(pikachu|lucario|charizard|rattata|arceus|gengar|unown)$'
       bdsp:
-        description: BDSP dex numbers to try through the Unity path (regex on file paths)
-        default: 'pm0165|pm0351'
+        description: BDSP model folders to try through the Unity path (space separated)
+        default: 'pm0165_00_00 pm0165_01_00 pm0351_11_00 pm0351_12_00 pm0165_00_01'
 
 permissions:
   contents: read
@@ -180,39 +180,23 @@ jobs:
         with:
           path: cache/bdsp
           key: bdsp-src-${{ github.run_id }}
-      - name: List, extract the asked species, run the Unity path
+      - name: List, then run the Unity path on the asked folders
         run: |
-          mkdir -p diag work/bdsp work/fbx work/glb tools
+          mkdir -p diag tools
           a="${{ steps.get.outputs.file }}"
           7z l "$a" > diag/bdsp-listing.txt
           tail -3 diag/bdsp-listing.txt
-          grep -E '${{ inputs.bdsp }}' diag/bdsp-listing.txt | head -60
-          awk '{print $NF}' diag/bdsp-listing.txt | grep '/' | awk -F/ '{OFS="/"; NF=NF>4?4:NF; print}' | sort | uniq -c | sort -rn | head -40
-          inc=()
-          for k in $(echo '${{ inputs.bdsp }}' | tr '|' ' '); do inc+=("-ir!*${k}*"); done
-          7z x -y -bd -owork/bdsp "$a" "${inc[@]}" > /dev/null
-          find work/bdsp -type f | head -80
           curl -fsSL "$ASM_URL" -o tools/asm.zip && unzip -q tools/asm.zip -d tools/asm
           curl -fsSL "$FBX2GLTF_URL" -o tools/fbx.zip && unzip -q tools/fbx.zip -d tools/fbx
-          find tools -maxdepth 3 -type f | head -40
-          cli=$(find tools/asm -name 'AssetStudioModCLI*' -type f | grep -v '\.dll$\|\.json$\|\.pdb$' | head -1)
-          chmod +x "$cli" $(find tools/fbx -type f -name 'FBX2glTF*')
-          "$cli" --help > diag/asm-help.txt 2>&1 || true
-          cat diag/asm-help.txt
-          "$cli" work/bdsp -m info > diag/asm-info.txt 2>&1 || true
-          head -80 diag/asm-info.txt
-          "$cli" work/bdsp -m animator -o work/fbx > diag/asm-animator.txt 2>&1 || true
-          tail -40 diag/asm-animator.txt
-          find work/fbx -type f | head -60
-          fbx=$(find tools/fbx -type f -name 'FBX2glTF*' | head -1)
-          for f in $(find work/fbx -name '*.fbx'); do
-            n=$(basename "$f" .fbx)
-            "$fbx" --binary --input "$f" --output "work/glb/$n" > "diag/fbx2gltf-$n.txt" 2>&1 || true
-          done
-          find work/glb -type f
-          node pipeline/bdsp/inspect.mjs $(find work/glb -name '*.glb') > diag/bdsp-glb.txt 2>&1 || true
-          head -150 diag/bdsp-glb.txt
-          cp $(find work/glb -name '*.glb' | head -4) diag/ 2>/dev/null || true
+          cli=$(find tools/asm -type f -name AssetStudioModCLI | head -1)
+          fbx=$(find tools/fbx -type f -name 'FBX2glTF-*' -not -name '*.txt' | head -1)
+          chmod +x "$cli" "$fbx"
+          pipeline/bdsp/extract.sh "$a" work/bdsp work/out "$cli" "$fbx" ${{ inputs.bdsp }}
+          find work/out -type f | sort
+          for g in $(find work/out -name '*.glb'); do node pipeline/bdsp/inspect.mjs "$g"; done > diag/bdsp-glb.txt 2>&1 || true
+          grep -v '^      ' diag/bdsp-glb.txt | head -200
+          cat work/fbx/*.log | grep -iv '^\[' | head -40
+          for d in work/out/*/; do n=$(basename "$d"); cp "$d/$n.glb" diag/ 2>/dev/null || true; (cd "$d" && ls) > "diag/bdsp-files-$n.txt"; done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -235,9 +219,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           mkdir -p pub
-          find art -type f -not -name 'plan.json' -exec cp -n {} pub/ \;
+          find art -type f -not -name 'plan.json' -exec cp --update=none {} pub/ \;
           cp art/diag-plan/work/plan.json pub/ 2>/dev/null || true
-          (cd pub && gzip -k plan.json showdown-pokedex.json p1-listing.txt bdsp-listing.txt 2>/dev/null; rm -f plan.json showdown-pokedex.json p1-listing.txt bdsp-listing.txt; sha256sum * > SHA256SUMS)
+          for f in plan.json showdown-pokedex.json p1-listing.txt bdsp-listing.txt; do if [ -f "pub/$f" ]; then gzip "pub/$f"; fi; done
+          (cd pub && sha256sum * > SHA256SUMS)
           ls pub | wc -l
           gh release view m1-diag >/dev/null 2>&1 || gh release create m1-diag --prerelease --title "m1 diagnostics" --notes "What the sources hold, read before deciding how to convert them."
           for a in $(gh release view m1-diag --json assets -q '.assets[].name'); do gh release delete-asset m1-diag "$a" -y; done

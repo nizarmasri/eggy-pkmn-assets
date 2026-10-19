@@ -67,15 +67,6 @@ namespace Eggy.Conv
             foreach (var clip in plan.AllClips) loaded[clip] = Clips.Load(job.Folder, clip, job.IsGf, readAnim, notes);
             if (diagDir != null) Diag.Write(job, model, readModel, loaded, diagDir);
 
-            // Meshes the battle idle keeps hidden (alternative parts shown by a single move) can't be
-            // switched on and off in plain glTF, so they are left out.
-            var idleClip = loaded[plan.Sources["idle"][0]];
-            var hidden = idleClip.VisibilityTracks.Where(v => v.Fixed == false).Select(v => v.Mesh).ToHashSet();
-            var dropped = model.Meshes.Where(m => hidden.Contains(m.Name)).Select(m => m.Name).ToList();
-            model.Meshes.RemoveAll(m => hidden.Contains(m.Name));
-            if (dropped.Count > 0) r["droppedHiddenMeshes"] = new JsonArray(dropped.Select(d => (JsonNode)d).ToArray());
-            int shownLater = loaded.Values.SelectMany(a => a.VisibilityTracks).Count(v => v.Fixed == null || v.Fixed == true);
-            if (shownLater > 0) notes.Add($"{shownLater} visibility tracks switch meshes during clips; glTF keeps the idle's set");
             if (loaded.Values.Any(a => a.MaterialTracks.Count > 0))
                 notes.Add("material tracks (UV/colour animation, e.g. eye movement) are not carried into glTF: " +
                           string.Join(", ", loaded.Where(kv => kv.Value.MaterialTracks.Count > 0).Select(kv => kv.Key)));
@@ -85,6 +76,9 @@ namespace Eggy.Conv
             model.Animations.AddRange(loaded.Values);
             int helpers = ScaleCompensation.Apply(model);
             r["sscHelpers"] = helpers;
+            // Meshes the clips show and hide: switched by joint scale keys (Visibility).
+            var vis = Visibility.Carry(model, loaded, plan.Sources["idle"][0]);
+            if (vis.Count > 0) r["visibility"] = vis;
 
             var skinner = new Skinner(model);
             Battle.Assemble(model, plan, loaded, skinner, r);
