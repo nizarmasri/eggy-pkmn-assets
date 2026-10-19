@@ -21,9 +21,10 @@ model's file, size, sha256, source game, height in metres, clip lengths, attack 
 game has one, `shiny: { file, bytes, sha256 }`: a companion holding only the materials the shiny changes,
 named as the base model's.
 
-Materials the game draws in a special way carry glTF material `extras.role`: `glow` on a Pokémon's flames
-and glow cores and an arena's light shafts and lamps (additive, unlit, no depth write), `water`, `fog` and
-`decal` on arenas.
+Materials the game draws in a special way carry glTF material `extras.role`: `glow` on a Pokémon's flames,
+glow cores and what its game adds onto the scene (Gastly's gas, Elekid's thunder, Cresselia's rings) and on an
+arena's light shafts and lamps (additive, unlit, no depth write), `water`, `fog` and `decal` on arenas. Parts
+the games draw see-through (Spiritomb's vortex, Castform's hoods) are glTF `BLEND` materials.
 
 ## The pipeline
 
