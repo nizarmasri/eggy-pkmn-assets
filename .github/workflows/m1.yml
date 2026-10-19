@@ -429,8 +429,8 @@ jobs:
             rm -f batch.*
           }
           make "$PACK" rel/release-main "" "The tarball in 10 MiB parts (pkmn-$PACK.tar.NN), models.lock.json for eggy, and every file of the pack on its own (arena GLBs as arena-<id>.glb)."
-          make "$PACK-shiny" rel/release-shiny "" "The shiny companions of $PACK (<id>.shiny.glb), also inside its tarball."
-          make "$PACK-review" rel/release-review "--prerelease" "Review sheets for $PACK: contact sheets of every model, close-ups of each fix, every arena from the battle camera."
+          make "$PACK-shiny" rel/release-shiny "--latest=false" "The shiny companions of $PACK (<id>.shiny.glb), also inside its tarball."
+          make "$PACK-review" rel/release-review "--prerelease --latest=false" "Review sheets for $PACK: contact sheets of every model, close-ups of each fix, every arena from the battle camera."
           gh release view "$PACK" --json assets --jq '.assets | length'
 
   tidy-caches:
