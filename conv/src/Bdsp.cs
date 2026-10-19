@@ -101,6 +101,53 @@ namespace Eggy.Conv
 
         static float F(string s) => float.Parse(s, System.Globalization.CultureInfo.InvariantCulture);
 
+        // Rim shells: a see-through copy of a part a few per cent larger, coloured by a tiny flat texture, which
+        // the game's shader shows only along the silhouette (a rim light). Drawn as a surface it hides the part
+        // inside it (Castform's faces in the sun, the rain and the snow), so it is left out. Returns what went.
+        public static List<string> DropRimShells(string dir, ModelData model, Dictionary<string, GfMaterial> mats)
+        {
+            var parts = new List<(MeshData Mesh, SubMeshData Sub, Vector3 Lo, Vector3 Hi)>();
+            foreach (var mesh in model.Meshes)
+                foreach (var sub in mesh.SubMeshes)
+                {
+                    var lo = new Vector3(float.MaxValue); var hi = new Vector3(float.MinValue);
+                    foreach (int i in sub.Indices) { lo = Vector3.Min(lo, mesh.Positions[i]); hi = Vector3.Max(hi, mesh.Positions[i]); }
+                    if (sub.Indices.Length > 0) parts.Add((mesh, sub, lo, hi));
+                }
+            var dropped = new List<string>();
+            foreach (var p in parts)
+            {
+                if (!mats.TryGetValue(p.Sub.Material, out var gm) || !(gm.Values.TryGetValue("BlendMode", out var bm) && bm >= 1)) continue;
+                var col = gm.Maps.FirstOrDefault(m => m.Sampler == "Col0Tex").Texture;
+                int width = col != null ? PngWidth(Path.Combine(dir, col + ".png")) : 0;
+                if (width == 0 || width > 64) continue;
+                var size = p.Hi - p.Lo;
+                bool shell = parts.Any(q =>
+                {
+                    if (q.Sub == p.Sub || q.Sub.Material == p.Sub.Material) return false;
+                    var inner = Vector3.Max(q.Hi - q.Lo, new Vector3(1e-4f));
+                    const float e = 0.001f;
+                    bool inside = p.Lo.X <= q.Lo.X + e && p.Lo.Y <= q.Lo.Y + e && p.Lo.Z <= q.Lo.Z + e
+                        && p.Hi.X >= q.Hi.X - e && p.Hi.Y >= q.Hi.Y - e && p.Hi.Z >= q.Hi.Z - e;
+                    var ratio = size / inner;
+                    return inside && Math.Max(ratio.X, Math.Max(ratio.Y, ratio.Z)) <= 1.1f;
+                });
+                if (!shell) continue;
+                p.Mesh.SubMeshes.Remove(p.Sub);
+                dropped.Add($"{p.Mesh.Name}/{p.Sub.Material}");
+            }
+            model.Meshes.RemoveAll(m => m.SubMeshes.Count == 0);
+            return dropped;
+        }
+
+        static int PngWidth(string file)
+        {
+            if (!File.Exists(file)) return 0;
+            var head = new byte[24];
+            using (var f = File.OpenRead(file)) if (f.Read(head, 0, 24) < 24) return 0;
+            return head[1] == (byte)'P' && head[2] == (byte)'N' && head[3] == (byte)'G' ? (head[16] << 24) | (head[17] << 16) | (head[18] << 8) | head[19] : 0;
+        }
+
         // A tangent-space normal map as glTF wants it (RGB, +Y up, which is Unity's convention too): BC5 exports
         // keep only X and Y (Z rebuilt), DXT5nm ones X in alpha and Y in green.
         public static byte[] TangentNormal(PokeModelExporter.Formats.Bntx.Texture t)
