@@ -1,5 +1,5 @@
 // Review sheets of the published arenas, drawn by three.js in headless Chrome (the game's renderer):
-// battle camera, overview and top view, as published and as a lit preview, with two B0 Pokémon on the
+// the game's battle shot large, an overview and a top view, materials drawn by their roles, with two Pokémon on the
 // singles spots at their real heights for scale. One JPEG per arena plus load checks.
 //
 //   node pipeline/arenas/render.mjs <out dir> <renders dir> <pokemon dir with models.json>
@@ -42,7 +42,7 @@ fs.mkdirSync(rendersDir, { recursive: true });
 const checks = {};
 let bad = 0;
 for (const [id, a] of Object.entries(arenas)) {
-  const page = await browser.newPage({ viewport: { width: 2400, height: 500 } });
+  const page = await browser.newPage({ viewport: { width: 1600, height: 1350 } });
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));

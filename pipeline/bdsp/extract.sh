@@ -27,16 +27,22 @@ for folder in "$@"; do
   echo "$folder: ${want[*]}"
   exp="$work/fbx/$folder"
   rm -rf "$exp" && mkdir -p "$exp"
-  "$cli" "$src" -m info > "$exp.info.log" 2>&1
-  grep -iE "AnimationClip|Animator|Mesh|Texture2D|SkinnedMesh" "$exp.info.log" | head -12
-  if ! "$cli" "$src" -m animator --fbx-animation all -o "$exp" > "$exp.log" 2>&1; then echo "$folder: AssetStudio failed"; tail -5 "$exp.log"; continue; fi
-  grep -iv '^\[[0-9]*%\]' "$exp.log" | tail -8
+  # --load-all: without it only the export types are read, and the battle clips (AnimationClip) never load.
+  "$cli" "$src" -m info --load-all > "$exp.info.log" 2>&1
+  grep -v "Loading\|^\[[0-9]*%\]" "$exp.info.log" | head -40
+  if ! "$cli" "$src" -m animator --load-all --fbx-animation all -o "$exp" > "$exp.log" 2>&1; then echo "$folder: AssetStudio failed"; tail -5 "$exp.log"; continue; fi
+  grep -iv '^\[[0-9]*%\]' "$exp.log" | tail -12
+  # The materials as Unity has them (which texture each one samples), for binding them after FBX2glTF.
+  "$cli" "$src" -t material --load-all -o "$exp/materials" > "$exp.mat.log" 2>&1 || tail -5 "$exp.mat.log"
+  find "$exp/materials" -type f | head -20
   f=$(find "$exp" -name "$folder.fbx" | head -1)
   [ -z "$f" ] && f=$(find "$exp" -name '*.fbx' | head -1)
   if [ -z "$f" ]; then echo "$folder: no FBX"; continue; fi
   dest="$out/$folder"
   mkdir -p "$dest"
   cp "$(dirname "$f")"/*.png "$dest/" 2>/dev/null
+  find "$exp/materials" -type f -exec cp {} "$dest/" \; 2>/dev/null
+  cp "$exp.info.log" "$dest/info.log"; cp "$exp.log" "$dest/animator.log"
   if ! "$fbx" --binary --verbose --input "$f" --output "$dest/$folder" > "$dest/fbx2gltf.log" 2>&1; then echo "$folder: FBX2glTF failed"; tail -5 "$dest/fbx2gltf.log"; continue; fi
   grep -iE "anim|take|stack" "$dest/fbx2gltf.log" | head -12
   echo "$folder: $(ls "$dest" | wc -l) files"

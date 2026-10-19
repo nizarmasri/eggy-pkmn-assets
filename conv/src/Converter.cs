@@ -56,6 +56,8 @@ namespace Eggy.Conv
                 if (job.Variant != null) r["variant"] = MaterialTable.Apply(model, Require(readModel, job.Folder + ".trmmt"), job.Variant);
                 var baked = SvMaterialBaker.Bake(model, readModel);
                 textures = baked.Textures;
+                int glows = Looks.RebakeGlows(model, textures, readModel);
+                if (glows > 0) r["glowsRebaked"] = glows;
                 mapping = m => Looks.Trinity(job, m, baked.Mappings[m.Name]);
             }
 
@@ -155,6 +157,7 @@ namespace Eggy.Conv
                 var sm = TrinityModelReader.Read(job.Folder + ".trmdl", readModel, shiny: true);
                 if (job.Variant != null) MaterialTable.Apply(sm, Require(readModel, job.Folder + ".trmmt"), job.Variant);
                 var baked = SvMaterialBaker.Bake(sm, readModel);
+                Looks.RebakeGlows(sm, baked.Textures, readModel);
                 shiny = new Shiny.Look { Materials = sm.Materials, Textures = baked.Textures, Mapping = m => Looks.Trinity(job, m, baked.Mappings[m.Name]) };
             }
             var used = model.Meshes.SelectMany(m => m.SubMeshes).Select(s => s.Material).Where(n => n != null);

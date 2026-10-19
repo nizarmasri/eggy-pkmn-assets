@@ -15,40 +15,50 @@
 <body>
 <div id="sheet"></div>
 <script type="module">
-  // One arena the way the game's three.js will draw it: from the battle camera (behind and above the
-  // near side, looking at the far spot), an overview, and from above with the spots and the floor
-  // radius marked. Two B0 Pokémon stand on the singles spots at their real heights, for scale.
+  // One arena the way the game's three.js draws it: large, from the game's wide battle shot (its tilt,
+  // lens and the screen places of the two sides, solved as games/pokebattle/client/engine/camera.ts
+  // does, with the arena laid under the stage's spots); below it an overview and a view from above with
+  // the spots and the floor radius marked. Two Pokémon stand on the singles spots at their real heights.
+  // Materials are drawn by their role as the game does (roles.ts, arenaModel.ts): water first, glow
+  // added without writing depth, fog cards at 0.45 of their alpha, decals pulled toward the camera.
+  // The clear colour is black, so whatever the arena leaves open shows.
   import * as THREE from 'three';
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
   import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-  import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
   const q = new URLSearchParams(location.search);
   const meta = JSON.parse(q.get('meta') || '{}');
-  const W = 800, H = 500;
-  const views = ['battle', 'overview', 'top'];
+  const BW = 1600, BH = 900, SW = 800, SH = 450;
   const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
   const gltf = await loader.loadAsync(q.get('model'));
   const arena = gltf.scene;
+  const roles = {};
+  arena.traverse((o) => {
+    if (!o.isMesh) return;
+    o.frustumCulled = false;
+    const m = o.material, role = m.userData?.role;
+    if (!role) return;
+    roles[role] = (roles[role] ?? 0) + 1;
+    if (role === 'water') o.renderOrder = -1;
+    if (role === 'glow') Object.assign(m, { blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
+    if (role === 'fog') { m.opacity *= 0.45; m.transparent = true; m.depthWrite = false; }
+    if (role === 'decal') Object.assign(m, { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4, depthWrite: false });
+    if (role === 'decal' && !m.transparent) o.renderOrder = 1;
+  });
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   renderer.setPixelRatio(1);
-  // A second row, ['as published', 'lit preview'], helped choose unlit; one row is drawn now.
-  const rows = ['as published'];
-  renderer.setSize(W * views.length, H * rows.length);
+  renderer.setSize(BW, BH + SH);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.NeutralToneMapping;
   renderer.setScissorTest(true);
   document.getElementById('sheet').appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x3a3f47);
-  // Lit arenas need light; unlit ones ignore it.
-  scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
-  scene.environmentIntensity = 0.5;
+  scene.background = new THREE.Color(0x000000);
   const sun = new THREE.DirectionalLight(0xffffff, 1.6);
   sun.position.set(3, 8, 4);
-  scene.add(sun, new THREE.HemisphereLight(0xdde6ff, 0x404040, 0.5), arena);
+  scene.add(sun, new THREE.HemisphereLight(0xdde6ff, 0x404040, 1.2), arena);
 
   // Spots: blue near, red far; singles as discs, doubles as rings. The floor radius as a yellow circle.
   const v3 = (a) => new THREE.Vector3(...a);
@@ -74,7 +84,6 @@
   scene.add(marks);
 
   // Pokémon for scale: normalised to height 1, scaled by models.json height; near faces +Z (toward far).
-  const actors = [];
   for (const [who, where, turn] of [[q.get('near'), 'near', 0], [q.get('far'), 'far', Math.PI]]) {
     if (!who || !s.singles) continue;
     const [file, height] = who.split('@');
@@ -82,64 +91,136 @@
     g.scene.scale.setScalar(Number(height));
     g.scene.position.copy(v3(s.singles[where]));
     g.scene.rotation.y = turn;
+    g.scene.traverse((o) => { if (o.isMesh) o.frustumCulled = false; });
     const mixer = new THREE.AnimationMixer(g.scene);
     const idle = g.animations.find((a) => a.name === 'idle');
     if (idle) { mixer.clipAction(idle).play(); mixer.update(0); }
     scene.add(g.scene);
-    actors.push(g.scene);
   }
+
+  // The game's wide shot (camera.ts: fitShot, aimShot; arena.ts: NEAR, FAR, PITCH, LENS), with the
+  // feet of the two sides where a landscape phone frame puts them, carried back into the arena's own
+  // space through the fit that lays the arena's spots under the stage's (arenaModel.ts: layArena).
+  const G_NEAR = [-1.45, 0, 2.05], G_FAR = [1.35, 0, -2.75], PITCH = -0.32, LENS = 28;
+  const NEAR_AT = [0.3, 0.86], FAR_AT = [0.68, 0.5];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const basis = (yaw, pitch) => {
+    const cp = Math.cos(pitch);
+    const fwd = [Math.sin(yaw) * cp, Math.sin(pitch), -Math.cos(yaw) * cp];
+    const right = [Math.cos(yaw), 0, Math.sin(yaw)];
+    return { fwd, right, up: cross(right, fwd) };
+  };
+  const fitShot = (yaw, aspect) => {
+    const b = basis(yaw, PITCH);
+    const ray = (p, t) => {
+      const x = (p[0] * 2 - 1) * t * aspect, y = (1 - p[1] * 2) * t;
+      return [0, 1, 2].map((i) => b.fwd[i] + b.right[i] * x + b.up[i] * y);
+    };
+    const d = [0, 1, 2].map((i) => G_NEAR[i] - G_FAR[i]);
+    const solve = (t) => {
+      const r1 = ray(NEAR_AT, t), r2 = ray(FAR_AT, t);
+      const m11 = dot(r1, r1), m12 = -dot(r1, r2), m22 = dot(r2, r2), b1 = dot(r1, d), b2 = -dot(r2, d);
+      const n = cross(r1, r2);
+      return { a: (b1 * m22 - b2 * m12) / (m11 * m22 - m12 * m12), err: dot(d, n) / Math.sqrt(dot(n, n)) };
+    };
+    const tOf = (deg) => Math.tan((deg * Math.PI) / 360);
+    let lo = tOf(2), hi = tOf(110), eLo = solve(lo).err;
+    const eHi = solve(hi).err;
+    let t;
+    if (Math.sign(eLo) !== Math.sign(eHi)) {
+      for (let i = 0; i < 40; i++) {
+        const mid = (lo + hi) / 2, e = solve(mid).err;
+        if (Math.sign(e) === Math.sign(eLo)) { lo = mid; eLo = e; } else hi = mid;
+      }
+      t = (lo + hi) / 2;
+    } else t = Math.abs(eLo) < Math.abs(eHi) ? lo : hi;
+    const r1 = ray(NEAR_AT, t), a = solve(t).a;
+    const pos = [0, 1, 2].map((i) => G_NEAR[i] - a * r1[i]);
+    const mid = [0, 1, 2].map((i) => (G_NEAR[i] + G_FAR[i]) / 2 - pos[i]);
+    const depth = dot(mid, b.fwd);
+    return { pos, target: [0, 1, 2].map((i) => pos[i] + b.fwd[i] * depth), fov: (Math.atan(t) * 360) / Math.PI, up: b.up };
+  };
+  const battleShot = (an, af, aspect) => {
+    let lo = -0.9, hi = 0.9, shot;
+    if (fitShot(lo, aspect).fov < LENS) shot = fitShot(lo, aspect);
+    else if (fitShot(hi, aspect).fov > LENS) shot = fitShot(hi, aspect);
+    else {
+      for (let i = 0; i < 36; i++) { const m = (lo + hi) / 2; if (fitShot(m, aspect).fov > LENS) lo = m; else hi = m; }
+      shot = fitShot((lo + hi) / 2, aspect);
+    }
+    // Arena → stage: T(G_NEAR) · Ry(yaw) · S(scale) · T(−near). The camera goes the other way.
+    const ang = (x, z) => Math.atan2(x, z);
+    const yaw = ang(G_FAR[0] - G_NEAR[0], G_FAR[2] - G_NEAR[2]) - ang(af.x - an.x, af.z - an.z);
+    const scale = Math.hypot(G_FAR[0] - G_NEAR[0], G_FAR[2] - G_NEAR[2]) / Math.max(1e-6, Math.hypot(af.x - an.x, af.z - an.z));
+    const fit = new THREE.Matrix4().makeTranslation(...G_NEAR)
+      .multiply(new THREE.Matrix4().makeRotationY(yaw))
+      .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
+      .multiply(new THREE.Matrix4().makeTranslation(-an.x, -an.y, -an.z));
+    const back = fit.clone().invert();
+    const rot = new THREE.Matrix4().makeRotationY(-yaw);
+    return {
+      pos: new THREE.Vector3(...shot.pos).applyMatrix4(back),
+      target: new THREE.Vector3(...shot.target).applyMatrix4(back),
+      up: new THREE.Vector3(...shot.up).applyMatrix4(rot).normalize(),
+      fov: shot.fov,
+    };
+  };
 
   const box = new THREE.Box3().setFromObject(arena, true);
   const size = box.getSize(new THREE.Vector3());
   const near = v3(s.singles?.near ?? [0, 0, -3]), far = v3(s.singles?.far ?? [0, 0, 3]);
   const D = Math.max(near.distanceTo(far), 2);
   const sheet = document.getElementById('sheet');
-  const camera = new THREE.PerspectiveCamera(40, W / H, 0.05, 4000);
-  // Row 2: the same arena with every unlit material drawn lit (Lambert, same maps and vertex colours),
-  // to judge whether the stage reads better under the game's lights.
-  const unlitMats = new Map();
-  arena.traverse((o) => { if (o.isMesh && o.material.isMeshBasicMaterial) unlitMats.set(o, o.material); });
-  const litMats = new Map([...unlitMats].map(([o, m]) => [o, new THREE.MeshLambertMaterial({
-    map: m.map, color: m.color, vertexColors: m.vertexColors, transparent: m.transparent, opacity: m.opacity,
-    alphaTest: m.alphaTest, side: m.side, depthWrite: m.depthWrite })]));
-  rows.forEach((row, y) => {
-  for (const [o, m] of (y === 0 ? unlitMats : litMats)) o.material = m;
-  views.forEach((view, x) => {
+  const camera = new THREE.PerspectiveCamera(40, 16 / 9, 0.05, 4000);
+  const views = [
+    { view: 'battle', x: 0, y: 0, w: BW, h: BH },
+    { view: 'overview', x: 0, y: BH, w: SW, h: SH },
+    { view: 'top', x: SW, y: BH, w: SW, h: SH },
+  ];
+  for (const { view, x, y, w, h } of views) {
     marks.visible = view !== 'battle';
+    camera.aspect = w / h;
     if (view === 'battle') {
-      // Behind and above the near spot, looking past it at the far one.
-      camera.fov = 45;
-      camera.position.set(near.x + 0.12 * D, near.y + 0.2 * D, near.z - 0.32 * D);
-      const t = near.clone().lerp(far, 0.55);
-      camera.lookAt(t.x, t.y + 0.6, t.z);
+      const shot = battleShot(near, far, w / h);
+      camera.fov = shot.fov;
+      camera.position.copy(shot.pos);
+      camera.up.copy(shot.up);
+      camera.lookAt(shot.target);
+      // The game cuts what stands between its camera and the field (arenaModel.ts: clearArena); a near
+      // plane short of the near side stands in for that here.
+      camera.near = 0.45 * shot.pos.distanceTo(near);
     } else if (view === 'overview') {
+      camera.up.set(0, 1, 0);
+      camera.near = 0.05;
       camera.fov = 50;
       const R = Math.max(size.x, size.z) * 0.5;
       const r = Math.max(6, Math.min(R, (meta.radius || D) * 3));
       camera.position.set(r * 1.1, r * 0.9, -r * 1.1);
       camera.lookAt(0, 0, 0);
     } else {
+      camera.up.set(0, 1, 0);
+      camera.near = 0.05;
       camera.fov = 40;
       const r = Math.max(5, (meta.radius || D) * 1.25);
       camera.position.set(0, r / Math.tan(THREE.MathUtils.degToRad(20)), -0.001);
       camera.lookAt(0, 0, 0);
     }
     camera.updateProjectionMatrix();
-    const py = (rows.length - 1 - y) * H;
-    renderer.setViewport(x * W, py, W, H);
-    renderer.setScissor(x * W, py, W, H);
+    const py = BH + SH - y - h;
+    renderer.setViewport(x, py, w, h);
+    renderer.setScissor(x, py, w, h);
     renderer.render(scene, camera);
     const label = document.createElement('div');
     label.className = 'label';
-    label.style.left = `${x * W + 6}px`;
-    label.style.top = `${y * H + 6}px`;
-    label.textContent = x === 0 ? `${meta.id} · ${meta.name ?? ''} · ${view} · ${row}` : view;
+    label.style.left = `${x + 6}px`;
+    label.style.top = `${y + 6}px`;
+    label.textContent = view === 'battle' ? `${meta.id} · ${meta.name ?? ''} · battle camera` : view;
     sheet.appendChild(label);
-  });
-  });
+  }
   let tris = 0;
   arena.traverse((o) => { if (o.isMesh) tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3; });
-  window.result = { tris, box: { min: box.min.toArray(), max: box.max.toArray() } };
+  window.result = { tris, roles, box: { min: box.min.toArray(), max: box.max.toArray() } };
 </script>
 </body>
 </html>

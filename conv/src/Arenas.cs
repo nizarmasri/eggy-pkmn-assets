@@ -22,7 +22,7 @@ namespace Eggy.Conv
     // copy of the mesh whose per-vertex alpha is the blend weight. Unlit by default: these stages are
     // lit by baked colour.
     // Writes <id>.glb (raw) and <id>.json (the report: spots, radius, material plan for the optimiser).
-    public static class Arenas
+    public static partial class Arenas
     {
         const float Cm = 0.01f; // the files are in centimetres
 
@@ -330,6 +330,9 @@ namespace Eggy.Conv
             public string Alpha = "OPAQUE";
             public float Cutoff = 0.5f;
             public string Note;
+            public string Role;           // how the game draws it (extras.role): water, glow, fog, decal
+            public Vector3 Water = new Vector3(0.2f, 0.45f, 0.6f); // the stage's sea colour, for rock feet
+            public bool LeafDetail;       // leaf cards: shading from the cut-out's own strokes
         }
 
         static Slot MakeSlot(GfMat m, string sampler, int set, string xf)
@@ -359,6 +362,7 @@ namespace Eggy.Conv
                 // Texture02 gradient on the second UV set, sampled per vertex.
                 k.Base = MakeSlot(m, "Texture01", m.In("UV_tex01"), null);
                 k.AlphaOnly = true;
+                k.LeafDetail = true; // the cut-out's dark strokes shade each card, per pixel
                 k.UseVertexColor = false; // these cards' vertex colours are not colour (near black)
                 k.Baked.Add((MakeSlot(m, "Texture02", m.In("UVSet01", 1), null), "multiply"));
             }
@@ -381,8 +385,8 @@ namespace Eggy.Conv
                             // gradient (sea rocks) whose role is unclear: multiplied in it turns the rocks
                             // black, so it is left out and the rocks keep their texture's own transparency.
                             k.Base = t2;
-                            if (store.Get(t2.Tex)?.HasAlpha == true) k.Alpha = "BLEND";
-                            k.Note = $"Texture01 ({t1.Tex}, a mask on UV set {t1.Set}) left out";
+                            k.Baked.Add((t1, "seafade"));
+                            k.Note = $"opaque rock; Texture01 ({t1.Tex}, a height mask on UV set {t1.Set}) fades its foot into the sea";
                         }
                         else k.Baked.Add((t2, "multiply"));
                     }
@@ -399,7 +403,10 @@ namespace Eggy.Conv
                 {
                     int blend = m.I.ContainsKey("TextureBlendType") ? m.In("TextureBlendType") : m.In("TexBlendType");
                     var t2 = MakeSlot(m, "Texture02", m.In("Tex02_UV", 1), "Tex02");
-                    k.Baked.Add((t2, blend switch { 2 => "multiply", 1 => "add", _ => "over" }));
+                    // A fog mask is height haze over distant scenery: screened in (black leaves the colour,
+                    // blue and white haze it), not multiplied (which turned the sea's islands dark green).
+                    bool fogMask = t2 != null && t2.Tex.Contains("fogmask");
+                    k.Baked.Add((t2, fogMask ? "screen" : blend switch { 2 => "multiply", 1 => "add", _ => "over" }));
                 }
                 if (m.Maps.ContainsKey("LightMask_uv1")) k.Baked.Add((MakeSlot(m, "LightMask_uv1", 1, null), "multiply"));
             }
@@ -441,7 +448,8 @@ namespace Eggy.Conv
                 k.Alpha = "BLEND";
                 k.UseVertexColor = false;
                 k.DoubleSided = true;
-                k.Note = "water: flat Base_Color1, translucent";
+                k.Role = "water";
+                k.Note = "water: flat Base_Color1, translucent (the game draws its own water look)";
                 return k;
             }
             else { k.Base = MakeSlot(m, "Texture01", 0, "Tex01"); k.Note = "unknown shader group, drawn with Texture01"; }
@@ -453,6 +461,14 @@ namespace Eggy.Conv
             k.Baked.RemoveAll(b => b.Slot == null || store.Get(b.Slot.Tex) == null);
             if (m.Sw("DiscardEnable")) { k.Alpha = "MASK"; float d = m.Fl("DiscardValuie"); k.Cutoff = d > 0.01f && d < 0.99f ? d : 0.5f; }
             else if (k.Alpha != "BLEND" && bt.HasAlpha && (m.In("BlendMode") == 5 || g == "FieldWaterShader02")) k.Alpha = "BLEND";
+            if (k.Baked.Any(b => b.Mode == "seafade")) k.Alpha = "OPAQUE";
+            // Roles. Fog cards keep their alpha (the game thins them); premultiplied blends (PreMultiplieMode 1)
+            // are light: shafts, glows, effect panels, drawn additively (black adds nothing, so the Champion's
+            // effect panel no longer shows as a black sheet).
+            string names = (m.Name + " " + k.Base.Tex).ToLowerInvariant();
+            if (names.Contains("fog")) { k.Role = "fog"; if (k.Alpha == "OPAQUE") k.Alpha = "BLEND"; }
+            else if (m.In("PreMultiplieMode") == 1 && m.In("BlendMode") == 5) { k.Role = "glow"; k.Alpha = "BLEND"; k.UseVertexColor = true; }
+            else if (g == "FieldWaterShader02" && !names.Contains("wave") && !names.Contains("weve")) { k.Role = "fog"; k.Alpha = "BLEND"; }
             return k;
         }
 
@@ -477,6 +493,9 @@ namespace Eggy.Conv
             var parts = new List<string>(spec.Parts);
             var built = new HashSet<string>();
             var vstats = new JsonObject();
+            // Triangles the refinement may add to the stage (masks on low-poly walls), and where it did.
+            int budget = 90000;
+            var refined = new JsonObject();
 
             void AddPart(string part)
             {
@@ -484,6 +503,9 @@ namespace Eggy.Conv
                 var stage = ReadStage(Path.Combine(dir, part + ".gfbmdl"));
                 var store = new TexStore(dir);
                 var looks = stage.Mats.Select(m => Decide(m, store)).ToList();
+                var sea = stage.Mats.FirstOrDefault(x => x.Group == "FieldWaterShader01");
+                if (sea != null && sea.C.TryGetValue("Base_Color1", out var seaColour))
+                    foreach (var look in looks) look.Water = seaColour;
                 bool near = part.StartsWith("btl_N_");
                 for (int mi = 0; mi < stage.Mats.Count; mi++)
                 {
@@ -491,13 +513,17 @@ namespace Eggy.Conv
                     if (k.Drop) { notes.Add($"{part}/{m.Name} ({m.Group}) left out: {k.Note}"); continue; }
                     if (k.Note != null) notes.Add($"{part}/{m.Name} ({m.Group}): {k.Note}");
                 }
-                foreach (var mesh in stage.Meshes)
+                foreach (var srcMesh in stage.Meshes)
                 {
-                    foreach (var (matIndex, idx) in mesh.Polys)
+                    foreach (var (matIndex, srcIdx) in srcMesh.Polys)
                     {
-                        if (matIndex < 0 || matIndex >= stage.Mats.Count || idx.Length == 0) continue;
+                        if (matIndex < 0 || matIndex >= stage.Mats.Count || srcIdx.Length == 0) continue;
                         var m = stage.Mats[matIndex]; var k = looks[matIndex];
                         if (k.Drop) continue;
+                        // Baked masks get vertices where they need them (ArenaRefine).
+                        int before = budget;
+                        var (mesh, idx) = Refine(srcMesh, srcIdx, k, store, ref budget);
+                        if (budget < before) refined[$"{part.Substring(4)}:{m.Name}"] = before - budget;
                         string matName = $"{part.Substring(4)}:{m.Name}";
                         if (k.Overlay == null) { Emit(b, store, mesh, idx, m, k, matName, false, false, part, near, vstats); continue; }
                         // Two-layer ground: triangles all of the second layer are drawn with it, opaque; triangles
@@ -577,6 +603,24 @@ namespace Eggy.Conv
             if (Math.Abs(h0) > 1e-4f)
                 foreach (var mesh in b.Model.Meshes) for (int i = 0; i < mesh.Positions.Length; i++) mesh.Positions[i].Y -= h0;
 
+            // ---- Decals: see-through layers lying on the ground (grass edges, painted marks) ----
+            foreach (var entry in b.Plan.OfType<JsonObject>())
+            {
+                if (entry["role"] != null || entry["alpha"]?.GetValue<string>() != "BLEND") continue;
+                string name = entry["name"].GetValue<string>();
+                float up = 0, all = 0;
+                foreach (var mesh in b.Model.Meshes)
+                    foreach (var sub in mesh.SubMeshes.Where(x => x.Material == name))
+                        for (int t = 0; t + 2 < sub.Indices.Length; t += 3)
+                        {
+                            var n = Vector3.Cross(mesh.Positions[sub.Indices[t + 1]] - mesh.Positions[sub.Indices[t]], mesh.Positions[sub.Indices[t + 2]] - mesh.Positions[sub.Indices[t]]);
+                            float area = n.Length();
+                            all += area;
+                            if (area > 0 && Math.Abs(n.Y) / area > 0.9f) up += area;
+                        }
+                if (all > 0 && up / all > 0.9f) entry["role"] = "decal";
+            }
+
             // ---- The GLB ----
             foreach (var m in b.Model.Materials) b.Maps[m.Name].Unlit = unlit;
             var glb = GlbWriter.Write(b.Model, b.Textures, m => b.Maps[m.Name], null);
@@ -594,6 +638,7 @@ namespace Eggy.Conv
             };
             r["materials"] = b.Plan;
             r["vertexColors"] = vstats;
+            r["refined"] = refined;
             r["notes"] = notes;
             return r;
         }
@@ -652,6 +697,8 @@ namespace Eggy.Conv
                     {
                         "multiply" => rgb * trgb,
                         "add" => Vector3.Min(Vector3.One, rgb + trgb),
+                        "screen" => Vector3.One - (Vector3.One - rgb) * (Vector3.One - trgb),
+                        "seafade" => Vector3.Lerp(rgb, k.Water, Math.Clamp(t.X, 0, 1) * 0.85f),
                         _ => Vector3.Lerp(rgb, trgb, t.W),
                     };
                 }
@@ -701,7 +748,21 @@ namespace Eggy.Conv
                     if (alphaOnly)
                     {
                         px = (byte[])px.Clone();
-                        for (int i = 0; i < px.Length; i += 4) px[i] = px[i + 1] = px[i + 2] = 255;
+                        if (k.LeafDetail)
+                        {
+                            // The cut-out's own strokes (dark greens inside the black leaf shapes) shade the
+                            // card per pixel: their brightness, stretched to the card's range, from 0.55 to 1.
+                            var lum = new List<float>();
+                            for (int i = 0; i < px.Length; i += 4) if (px[i + 3] > 128) lum.Add(0.3f * px[i] + 0.59f * px[i + 1] + 0.11f * px[i + 2]);
+                            lum.Sort();
+                            float hi = lum.Count > 0 ? Math.Max(8, lum[(int)(lum.Count * 0.95f)]) : 255;
+                            for (int i = 0; i < px.Length; i += 4)
+                            {
+                                float d = Math.Clamp((0.3f * px[i] + 0.59f * px[i + 1] + 0.11f * px[i + 2]) / hi, 0, 1);
+                                px[i] = px[i + 1] = px[i + 2] = (byte)(255 * (0.55f + 0.45f * d));
+                            }
+                        }
+                        else for (int i = 0; i < px.Length; i += 4) px[i] = px[i + 1] = px[i + 2] = 255;
                     }
                     if (product != null)
                     {
@@ -737,6 +798,7 @@ namespace Eggy.Conv
                 ["product"] = overlay || ground ? null : k.Product?.Tex,
                 ["doubleSided"] = k.DoubleSided,
                 ["rotate"] = slot != null && Math.Abs(slot.Rotate) > 1e-4f ? (JsonNode)slot.Rotate : null,
+                ["role"] = overlay ? "decal" : k.Role,
             });
         }
 

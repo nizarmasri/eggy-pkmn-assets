@@ -2,7 +2,9 @@
 // and lists exactly the zip entries its battle model and its shiny need. Ids no Switch game has a
 // battle model for go to the Brilliant Diamond / Shining Pearl path (src "bdsp") or are reported missing.
 //
-//   node pipeline/plan.mjs <ids.json> <out plan.json> [--shards 16] [--only <regex>] [--release m1]
+//   node pipeline/plan.mjs <ids.json> <out plan.json> [--shards 16] [--only <regex>] [--release m1] [--extra 'lucario@za …']
+//
+// --extra (diagnostics only): also plan an id from one named game, as job "<id>@<game>".
 import fs from 'node:fs';
 import path from 'node:path';
 import { openFolder } from './lib/mega.mjs';
@@ -17,12 +19,14 @@ const arg = (name, fallback) => {
 const shards = Number(arg('shards', 16));
 const only = arg('only', '') ? new RegExp(arg('only')) : null;
 const release = arg('release', 'm1');
+const extra = arg('extra', '').split(/\s+/).filter(Boolean).map((x) => x.split('@'));
 
 // Species Brilliant Diamond / Shining Pearl has and no Switch battle rip does (measured: no folder with a
 // model and a battle idle in SV, Z-A, LA, SwSh or LGPE). Their models come from BDSP's Unity bundles.
 export const BDSP_ONLY = new Set([165, 166, 276, 277, 300, 301, 327, 351, 366, 367, 368]);
 
-const ids = JSON.parse(fs.readFileSync(idsPath, 'utf8')).filter((e) => !only || only.test(e.id));
+const all = JSON.parse(fs.readFileSync(idsPath, 'utf8'));
+const ids = all.filter((e) => !only || only.test(e.id));
 const files = await openFolder();
 const cds = {};
 for (const game of PRIORITY)
@@ -73,6 +77,14 @@ function plan(e) {
 const order = [...ids].sort((a, b) => Number(Boolean(a.female || a.id.includes('-'))) - Number(Boolean(b.female || b.id.includes('-'))));
 const planned = new Map(order.map((e) => [e.id, plan(e)]));
 const jobs = ids.map((e) => planned.get(e.id)).map((j) => ({ ...j, shard: j.src === 'bdsp' ? 'bdsp' : j.dex % shards }));
+for (const [id, game] of extra) {
+  const e = all.find((x) => x.id === id);
+  const f = e && GAMES[game] && pickFolder(game, e);
+  if (!f) { console.log(`  extra ${id}@${game}: no such folder`); continue; }
+  const entries = ['model', 'anim'].flatMap((kind) =>
+    [...f[kind].entries()].filter(([file]) => wantsFile(game, kind, file)).map(([file, { zip, entry }]) => ({ kind, file, zip, ...entry })));
+  jobs.push({ ...e, id: `${id}@${game}`, src: game, folder: f.folder, shiny: entries.some((x) => /_rare[._]/.test(x.file)), entries, shard: e.dex % shards });
+}
 
 const bySrc = {};
 for (const j of jobs) {

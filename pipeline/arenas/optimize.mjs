@@ -55,7 +55,8 @@ for (const spec of list.arenas) {
       if (info && p.wrap) info.setWrapS(p.wrap[0]).setWrapT(p.wrap[1]);
     }
     if (tex) (mat.getName().replace(/^hull /, '').startsWith('N_') ? nearTex : farOnly).add(tex);
-    mat.setExtras({});
+    // How the game draws it (material.userData.role): water, glow, fog or decal; nothing for the rest.
+    mat.setExtras(p?.role ? { role: p.role } : {});
   }
   for (const t of nearTex) farOnly.delete(t);
   // Vertex colours: the converter keeps them under an application name; they are plain COLOR_0 here.
