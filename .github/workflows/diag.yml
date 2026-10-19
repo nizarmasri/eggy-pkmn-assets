@@ -12,7 +12,7 @@ on:
     inputs:
       models:
         description: Ids to convert with diagnostics (regex)
-        default: '^(pikachu|lucario|charizard|rattata|arceus|gengar|unown)$'
+        default: '^(pikachu|charizard|arceus-fire|arceus-water|absol|aggron|alakazam|nidoking|kingler|rattata|ponyta)$'
       bdsp:
         description: BDSP model folders to try through the Unity path (space separated)
         default: 'pm0165_00_00 pm0165_01_00 pm0351_11_00 pm0351_12_00 pm0165_00_01'

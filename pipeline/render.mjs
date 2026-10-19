@@ -34,7 +34,7 @@ const browser = await chromium.launch({
 });
 fs.mkdirSync(rendersDir, { recursive: true });
 const jobs = [
-  ...fs.readdirSync(outDir).filter((f) => f.endsWith('.glb')).map((f) => ['out', f]),
+  ...fs.readdirSync(outDir).filter((f) => f.endsWith('.glb') && !f.endsWith('.shiny.glb')).map((f) => ['out', f]),
   ...(fs.existsSync(reviewDir) ? fs.readdirSync(reviewDir).filter((f) => f.endsWith('.glb')).map((f) => ['review', f]) : []),
 ];
 const checks = {};
@@ -46,11 +46,13 @@ for (const [dir, file] of jobs) {
   const meta = { id: name, src: r.src, folder: r.folder, hit: r.hit };
   // RENDER_VARIANTS=1: four more face rows (see render/index.html) to tell what a look comes from.
   const variants = process.env.RENDER_VARIANTS === '1';
-  const page = await browser.newPage({ viewport: { width: 2400, height: variants ? 2100 : 900 } });
+  const shiny = dir === 'out' && fs.existsSync(path.join(outDir, `${name}.shiny.glb`)) ? `/out/${name}.shiny.glb` : null;
+  const rowCount = 3 + (shiny ? 1 : 0) + (variants ? 4 : 0);
+  const page = await browser.newPage({ viewport: { width: 2400, height: 300 * rowCount } });
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
-  await page.goto(`http://127.0.0.1:${port}/render/index.html?model=/${dir}/${file}&meta=${encodeURIComponent(JSON.stringify(meta))}${variants ? '&variants=1' : ''}`);
+  await page.goto(`http://127.0.0.1:${port}/render/index.html?model=/${dir}/${file}&meta=${encodeURIComponent(JSON.stringify(meta))}${variants ? '&variants=1' : ''}${shiny ? `&shiny=${encodeURIComponent(shiny)}` : ''}`);
   try {
     await page.waitForFunction(() => window.result, null, { timeout: 180000 });
     const result = await page.evaluate(() => window.result);

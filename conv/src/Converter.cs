@@ -52,9 +52,11 @@ namespace Eggy.Conv
             else
             {
                 model = TrinityModelReader.Read(job.Folder + ".trmdl", readModel);
+                // Arceus-<Type>: the type's colours from the material table, over the base materials.
+                if (job.Variant != null) r["variant"] = MaterialTable.Apply(model, Require(readModel, job.Folder + ".trmmt"), job.Variant);
                 var baked = SvMaterialBaker.Bake(model, readModel);
                 textures = baked.Textures;
-                mapping = m => baked.Mappings[m.Name];
+                mapping = m => Looks.Trinity(job, m, baked.Mappings[m.Name]);
             }
 
             // ---- Clips ----
@@ -123,8 +125,43 @@ namespace Eggy.Conv
                 ["skinned"] = m.Joints != null,
             }).ToArray());
             r["rawBytes"] = glb.Length;
+
+            // ---- The shiny companion: the materials its shiny set changes, under the same names ----
+            if (job.Shiny)
+            {
+                try { r["shiny"] = ShinyLook(job, gfFlipV, model, textures, mapping, readModel, outPath); }
+                catch (Exception e) { r["shiny"] = new JsonObject { ["error"] = e.Message }; }
+            }
             return r;
         }
+
+        static JsonObject ShinyLook(Job job, bool gfFlipV, ModelData model, Dictionary<string, byte[]> textures,
+            Func<MaterialData, MaterialMapping> mapping, Func<string, byte[]> readModel, string outPath)
+        {
+            var mine = new Shiny.Look { Materials = model.Materials, Textures = textures, Mapping = mapping };
+            Shiny.Look shiny;
+            if (job.IsGf)
+            {
+                var gf = GfModelReader.Read(job.Folder + "_rare.gfbmdl", readModel, new JsonObject());
+                var baked = GfMaterials.Bake(gf, readModel, new JsonObject(), bottomOrigin: gfFlipV, null);
+                shiny = new Shiny.Look
+                {
+                    Materials = gf.Model.Materials, Textures = baked.Textures,
+                    Mapping = m => baked.Mappings.TryGetValue(m.Name, out var mm) ? mm : MaterialMapping.Default(m),
+                };
+            }
+            else
+            {
+                var sm = TrinityModelReader.Read(job.Folder + ".trmdl", readModel, shiny: true);
+                if (job.Variant != null) MaterialTable.Apply(sm, Require(readModel, job.Folder + ".trmmt"), job.Variant);
+                var baked = SvMaterialBaker.Bake(sm, readModel);
+                shiny = new Shiny.Look { Materials = sm.Materials, Textures = baked.Textures, Mapping = m => Looks.Trinity(job, m, baked.Mappings[m.Name]) };
+            }
+            var used = model.Meshes.SelectMany(m => m.SubMeshes).Select(s => s.Material).Where(n => n != null);
+            return Shiny.Write(mine, shiny, used, Path.Combine(Path.GetDirectoryName(outPath), job.Id + ".shiny.glb"));
+        }
+
+        static byte[] Require(Func<string, byte[]> read, string name) => read(name) ?? throw new FileNotFoundException("missing " + name);
 
         // SwSh/LGPE models are authored in centimetres; Trinity models in metres.
         static double Units(Job job) => job.IsGf ? GfModelReader.UnitsToMetres : 1.0;

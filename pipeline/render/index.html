@@ -32,7 +32,8 @@
   // culling of skinned meshes (bounds from the first pose drawn), no normal maps, no AO, and the
   // game's stage material (Lambert, metalness dropped).
   const variants = q.get('variants') === '1';
-  const rows = ['front', 'side', 'face', ...(variants ? ['face culled', 'face no normal map', 'face no AO', 'face Lambert'] : [])];
+  const shinyUrl = q.get('shiny');
+  const rows = ['front', 'side', 'face', ...(shinyUrl ? ['shiny'] : []), ...(variants ? ['face, three culling', 'face no normal map', 'face no AO', 'face Lambert'] : [])];
 
   const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
   const gltf = await loader.loadAsync(url);
@@ -41,11 +42,24 @@
   // drew, which hides small parts (eyes) once a clip moves them away from there.
   const meshList = [];
   model.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; meshList.push(o); } });
+  // Materials the game draws in a special way (extras.role): glow is additive and writes no depth.
+  for (const m of meshList)
+    if (m.material.userData?.role === 'glow') Object.assign(m.material, { blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
   const original = new Map(meshList.map((m) => [m, m.material]));
+  // The shiny companion: its materials replace the base's of the same name.
+  const shinyMats = new Map();
+  if (shinyUrl) {
+    const s = await loader.loadAsync(shinyUrl);
+    for (const mat of await s.parser.getDependencies('material')) {
+      if (mat.userData?.role === 'glow') Object.assign(mat, { blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
+      shinyMats.set(mat.name, mat);
+    }
+  }
   function look(kind) {
     for (const m of meshList) {
       const base = original.get(m);
-      m.frustumCulled = kind !== 'face culled';
+      m.frustumCulled = kind === 'face, three culling';
+      if (kind === 'shiny') { m.material = shinyMats.get(base.name) ?? base; continue; }
       if (kind === 'face no normal map' || kind === 'face no AO') {
         const c = base.clone();
         if (kind === 'face no normal map') c.normalMap = null;
@@ -141,7 +155,7 @@
         target = eyes.isEmpty() ? new THREE.Vector3(c.x, box.min.y + size.y * 0.78, c.z) : eyes.getCenter(new THREE.Vector3());
         dist = 0.95;
       }
-      const dir = row === 'side' ? new THREE.Vector3(1, 0.18, 0) : new THREE.Vector3(0, 0.12, 1);
+      const dir = row === 'side' ? new THREE.Vector3(1, 0.18, 0) : new THREE.Vector3(0, 0.12, 1); // shiny: from the front
       camera.position.copy(target).addScaledVector(dir.normalize(), dist);
       camera.lookAt(target);
       const px = x * CELL, py = (rows.length - 1 - y) * CELL;

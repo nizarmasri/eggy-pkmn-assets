@@ -28,7 +28,38 @@ const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies(
 
 fs.mkdirSync(outDir, { recursive: true });
 fs.mkdirSync(reviewDir, { recursive: true });
-const reports = fs.readdirSync(rawDir).filter((f) => f.endsWith('.json')).sort();
+const reports = fs.readdirSync(rawDir).filter((f) => f.endsWith('.json') && !f.endsWith('.shiny.json')).sort();
+
+// glTF materials from the converter's: alpha tests, roles, unlit flames. Shared by models and their
+// shiny companions, so a companion's material is exactly what the base's would be with its shiny look.
+function materials(root) {
+  for (const mat of root.listMaterials()) {
+    const x = mat.getExtras() ?? {};
+    const options = x.options ?? {};
+    const floats = x.floats ?? {};
+    const alphaType = String(x.alphaType ?? '');
+    // Cut-out parts (fur cards, wing edges): the game tests alpha against a threshold.
+    if (options.EnableAlphaTest === 'True' || /mask|cutout|clip|alphatest/i.test(alphaType)) {
+      mat.setAlphaMode('MASK').setAlphaCutoff(floats.AlphaTestThreshold ?? floats.AlphaTestRef ?? 0.5);
+    }
+    const role = options.EggyRole;
+    if (role === 'glow') {
+      // A flame or glow core: unlit, and the game draws it additively without writing depth.
+      mat.setAlphaMode('BLEND').setDoubleSided(true).setEmissiveFactor([0, 0, 0]).setEmissiveTexture(null);
+      mat.setExtras({ role });
+      continue;
+    }
+    // Other parts the game draws unlit: emissive in standard PBR, so they glow under any light.
+    if (mat.getExtension('KHR_materials_unlit')) {
+      mat.setExtension('KHR_materials_unlit', null);
+      if (mat.getBaseColorTexture() && !mat.getEmissiveTexture()) mat.setEmissiveTexture(mat.getBaseColorTexture());
+      mat.setEmissiveFactor([1, 1, 1]);
+    }
+    mat.setExtras({});
+  }
+  if (!root.listMaterials().some((m) => m.getExtension('KHR_materials_unlit')))
+    root.listExtensionsUsed().find((e) => e.extensionName === 'KHR_materials_unlit')?.dispose();
+}
 const models = {};
 const report = {};
 const failures = [];
@@ -52,24 +83,7 @@ for (const file of reports) {
   const s = r.normalize.scale;
   top.setName(r.id).setScale([s, s, s]).setTranslation(r.normalize.translation);
 
-  for (const mat of root.listMaterials()) {
-    const x = mat.getExtras() ?? {};
-    const options = x.options ?? {};
-    const floats = x.floats ?? {};
-    const alphaType = String(x.alphaType ?? '');
-    // Cut-out parts (fur cards, wing edges): the game tests alpha against a threshold.
-    if (options.EnableAlphaTest === 'True' || /mask|cutout|clip|alphatest/i.test(alphaType)) {
-      mat.setAlphaMode('MASK').setAlphaCutoff(floats.AlphaTestThreshold ?? floats.AlphaTestRef ?? 0.5);
-    }
-    // Flames and glows the game draws unlit: emissive in standard PBR, so they glow under any light.
-    if (mat.getExtension('KHR_materials_unlit')) {
-      mat.setExtension('KHR_materials_unlit', null);
-      if (mat.getBaseColorTexture() && !mat.getEmissiveTexture()) mat.setEmissiveTexture(mat.getBaseColorTexture());
-      mat.setEmissiveFactor([1, 1, 1]);
-    }
-    mat.setExtras({});
-  }
-  root.listExtensionsUsed().find((e) => e.extensionName === 'KHR_materials_unlit')?.dispose();
+  materials(root);
   root.listExtensionsUsed().find((e) => e.extensionName === 'KHR_node_visibility')?.dispose();
   for (const mesh of root.listMeshes())
     for (const prim of mesh.listPrimitives())
@@ -82,7 +96,8 @@ for (const file of reports) {
   await doc.transform(
     resample({ tolerance: 1e-4 }),
     prune({ keepLeaves: false }),
-    dedup(),
+    // Materials keep their names (a shiny companion swaps them in by name), even where two look the same.
+    dedup({ keepUniqueNames: true }),
     textureCompress({ encoder: sharp, targetFormat: 'webp', resize: [1024, 1024], quality: 88, effort: 90 }),
     reorder({ encoder: MeshoptEncoder }),
     quantize(),
@@ -95,6 +110,7 @@ for (const file of reports) {
   if (review) continue;
 
   const sha256 = crypto.createHash('sha256').update(glb).digest('hex');
+  const shiny = r.shiny?.file ? await companion(r.id, new Set(root.listMaterials().map((m) => m.getName()))) : null;
   models[r.id] = {
     file: `${r.id}.glb`,
     bytes: glb.length,
@@ -104,6 +120,7 @@ for (const file of reports) {
     height: r.height,
     clips: r.clips,
     hit: r.hit,
+    ...(shiny ? { shiny } : {}),
   };
   const textures = root.listTextures().map((t) => {
     const size = t.getSize();
@@ -113,13 +130,42 @@ for (const file of reports) {
   console.log(`${r.id}: ${(r.rawBytes / 1e6).toFixed(1)} MB raw -> ${(glb.length / 1e6).toFixed(2)} MB, ${r.tris} tris, ${r.bones} bones`);
 }
 
+// The shiny companion: its materials as the base's are made, WebP textures, named after the base's.
+// A base material the converter split off for an inverted hull ("hull <name>") gets its shiny copy too.
+async function companion(id, baseNames) {
+  const doc = await io.read(path.join(rawDir, `${id}.shiny.glb`));
+  const root = doc.getRoot();
+  materials(root);
+  for (const mat of [...root.listMaterials()]) {
+    const hull = `hull ${mat.getName()}`;
+    if (!baseNames.has(hull)) continue;
+    const copy = mat.clone().setName(hull).setDoubleSided(false);
+    const node = doc.createNode(`shiny ${hull}`).setMesh(doc.createMesh(`shiny ${hull}`).addPrimitive(
+      root.listMeshes()[0].listPrimitives()[0].clone().setMaterial(copy)));
+    root.listScenes()[0].addChild(node);
+  }
+  const missing = root.listMaterials().map((m) => m.getName()).filter((n) => !baseNames.has(n));
+  if (missing.length) throw new Error(`${id}.shiny.glb: materials not in the base model: ${missing.join(', ')}`);
+  for (const list of [root.listNodes(), root.listMeshes(), root.listTextures()]) for (const item of list) item.setExtras({});
+  await doc.transform(
+    prune({ keepLeaves: true }),
+    dedup({ keepUniqueNames: true }),
+    textureCompress({ encoder: sharp, targetFormat: 'webp', resize: [1024, 1024], quality: 88, effort: 90 }),
+  );
+  doc.createExtension(EXTMeshoptCompression).setRequired(true).setEncoderOptions({ method: EXTMeshoptCompression.EncoderMethod.QUANTIZE });
+  const glb = Buffer.from(await io.writeBinary(doc));
+  const file = `${id}.shiny.glb`;
+  fs.writeFileSync(path.join(outDir, file), glb);
+  return { file, bytes: glb.length, sha256: crypto.createHash('sha256').update(glb).digest('hex') };
+}
+
 const ids = Object.keys(models).sort();
 const sorted = Object.fromEntries(ids.map((id) => [id, models[id]]));
 fs.writeFileSync(path.join(outDir, 'models.json'), JSON.stringify({ v: 1, models: sorted }, null, 1) + '\n');
 fs.writeFileSync(path.join(outDir, 'report.json'), JSON.stringify(report, null, 1) + '\n');
 
 // SHA256SUMS lists every published file, models.json and the report included; fetch.mjs follows it.
-const published = [...ids.map((id) => models[id].file), 'models.json', 'report.json'];
+const published = [...ids.flatMap((id) => [models[id].file, ...(models[id].shiny ? [models[id].shiny.file] : [])]), 'models.json', 'report.json'];
 const sums = published.map((f) => `${crypto.createHash('sha256').update(fs.readFileSync(path.join(outDir, f))).digest('hex')}  ${f}`);
 fs.writeFileSync(path.join(outDir, 'SHA256SUMS'), sums.join('\n') + '\n');
 
