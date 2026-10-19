@@ -831,8 +831,8 @@ namespace Eggy.Conv
                             for (int x = 0; x < tex.W; x++)
                             {
                                 var uv = new Vector2((x + 0.5f) / tex.W, 1 - (y + 0.5f) / tex.H);
-                                float n = Sample(nt, (uv - slot.Translate) / slot.Scale * noise.Scale + noise.Translate, noise.WrapU, noise.WrapV).X;
-                                px[(y * tex.W + x) * 4 + 3] = (byte)Math.Round(255 * Math.Clamp(NoiseCut / Math.Max(n, NoiseCut), 0, 1));
+                                float nv = Sample(nt, (uv - slot.Translate) / slot.Scale * noise.Scale + noise.Translate, noise.WrapU, noise.WrapV).X;
+                                px[(y * tex.W + x) * 4 + 3] = (byte)Math.Round(255 * Math.Clamp(NoiseCut / Math.Max(nv, NoiseCut), 0, 1));
                             }
                     }
                     b.Textures[key] = Png.Encode(px, tex.W, tex.H);
