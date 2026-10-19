@@ -193,7 +193,11 @@ jobs:
           perl -0pi -e 's/(ClassIDType\.Animator,\s*ClassIDType\.Mesh,\s*ClassIDType\.Texture2D,)/$1\n                            ClassIDType.AnimationClip,/' "$o"
           grep -n -A4 'ClassIDType.Animator,$' "$o" | head -8
           dotnet build tools/asm-src/AssetStudioCLI/AssetStudioCLI.csproj -c Release -f net9.0 -r linux-x64 --self-contained false -o tools/asm-build --nologo -clp:ErrorsOnly
-          cp tools/asm-build/AssetStudioModCLI.dll "$(dirname "$cli")/"
+          find tools/asm -maxdepth 3 | head -30
+          find tools/asm -name '*.so' -exec cp -n {} tools/asm-build/ \;
+          ls tools/asm-build | head -40
+          cli=tools/asm-build/AssetStudioModCLI
+          chmod +x "$cli"
           pipeline/bdsp/extract.sh "$a" work/bdsp work/out "$cli" "$fbx" ${{ inputs.bdsp }}
           for g in $(find work/out -name '*.glb'); do node pipeline/bdsp/inspect.mjs "$g"; done > diag/bdsp-glb.txt 2>&1 || true
           grep -v '^      ' diag/bdsp-glb.txt | head -200
@@ -288,8 +292,13 @@ jobs:
           mkdir -p pub
           find art -type f -not -name 'plan.json' -exec cp --update=none {} pub/ \;
           if [ -f art/diag-plan/work/plan.json ]; then gzip -c art/diag-plan/work/plan.json > pub/plan.json.gz; fi
-          (cd pub && sha256sum * > SHA256SUMS)
-          ls pub | wc -l
           gh release view m1-diag >/dev/null 2>&1 || gh release create m1-diag --prerelease --title "m1 diagnostics" --notes "What the sources hold, read before deciding how to convert them."
-          for a in $(gh release view m1-diag --json assets -q '.assets[].name'); do gh release delete-asset m1-diag "$a" -y; done
+          # Earlier runs' files stay (a run that skips the arenas keeps the last arena sheets); SHA256SUMS
+          # lists them all, this run's sums replacing theirs.
+          gh release download m1-diag -p SHA256SUMS -D old 2>/dev/null || mkdir -p old
+          (cd pub && sha256sum * > ../new.sums)
+          touch old/SHA256SUMS
+          awk 'NR == FNR { fresh[substr($0, 67)] = 1; next } !(substr($0, 67) in fresh)' new.sums old/SHA256SUMS > keep.sums
+          cat keep.sums new.sums | sort -k2 > pub/SHA256SUMS
+          ls pub | wc -l
           gh release upload m1-diag pub/* --clobber

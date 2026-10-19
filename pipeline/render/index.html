@@ -7,6 +7,7 @@
   html, body { margin: 0; background: #2b2f36; font: 600 15px/1.2 system-ui, sans-serif; color: #e8eaed; }
   #sheet { position: relative; }
   .label { position: absolute; padding: 4px 7px; background: #0009; border-radius: 4px; }
+  .compact .label { font-size: 13px; padding: 3px 6px; }
   #title { position: absolute; right: 10px; bottom: 8px; background: #0009; padding: 4px 8px; border-radius: 4px; }
 </style>
 <script type="importmap">
@@ -32,6 +33,11 @@
   // culling of skinned meshes (bounds from the first pose drawn), no normal maps, no AO, and the
   // game's stage material (Lambert, metalness dropped).
   const variants = q.get('variants') === '1';
+  // ?compact=1: one strip for the contact sheets: idle from the front, the physical attack from the side at
+  // its hit, the face mid special attack, and the shiny's idle when there is one.
+  const compact = q.get('compact') === '1';
+  const SMALL = 240;
+  if (compact) document.getElementById('sheet').className = 'compact';
   const shinyUrl = q.get('shiny');
   const rows = ['front', 'side', 'face', ...(shinyUrl ? ['shiny'] : []), ...(variants ? ['face, three culling', 'face no normal map', 'face no AO', 'face Lambert'] : [])];
 
@@ -76,7 +82,9 @@
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   renderer.setPixelRatio(1);
-  renderer.setSize(CELL * shown.length, CELL * rows.length);
+  const strip = [['idle', 'front'], [clips.physical ? 'physical' : 'idle', 'side'], [clips.special ? 'special' : 'idle', 'face'], ...(shinyUrl ? [['idle', 'shiny']] : [])];
+  if (compact) renderer.setSize(SMALL * strip.length, SMALL);
+  else renderer.setSize(CELL * shown.length, CELL * rows.length);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.NeutralToneMapping; // keeps hue and saturation, to judge the materials
   renderer.setScissorTest(true);
@@ -140,7 +148,8 @@
 
   const camera = new THREE.PerspectiveCamera(30, 1, 0.01, 50);
   const sheet = document.getElementById('sheet');
-  shown.forEach((name, x) => {
+  // One tile: the clip at its telling moment, seen as `row` says, at column x / row y of `cell` pixels.
+  function tile(name, row, x, y, cell, rowsHigh, text) {
     pose(name);
     box.setFromObject(model, true);
     const c = box.getCenter(new THREE.Vector3());
@@ -148,33 +157,33 @@
     // The face: centred on the eyes (meshes whose material is named "eye"), else the top of the model.
     const eyes = new THREE.Box3();
     model.traverse((o) => { if (o.isMesh && /eye/i.test(o.material?.name ?? '')) eyes.union(new THREE.Box3().setFromObject(o, true)); });
-    rows.forEach((row, y) => {
-      look(row);
-      let target = new THREE.Vector3(0, 0.5, 0), dist = 3.4;
-      if (row.startsWith('face')) {
-        target = eyes.isEmpty() ? new THREE.Vector3(c.x, box.min.y + size.y * 0.78, c.z) : eyes.getCenter(new THREE.Vector3());
-        dist = 0.95;
-      }
-      const dir = row === 'side' ? new THREE.Vector3(1, 0.18, 0) : new THREE.Vector3(0, 0.12, 1); // shiny: from the front
-      camera.position.copy(target).addScaledVector(dir.normalize(), dist);
-      camera.lookAt(target);
-      const px = x * CELL, py = (rows.length - 1 - y) * CELL;
-      renderer.setViewport(px, py, CELL, CELL);
-      renderer.setScissor(px, py, CELL, CELL);
-      renderer.render(scene, camera);
-      const label = document.createElement('div');
-      label.className = 'label';
-      label.style.left = `${x * CELL + 6}px`;
-      label.style.top = `${y * CELL + 6}px`;
-      label.textContent = y === 0 ? `${name} ${clips[name].duration.toFixed(2)}s` : row;
-      sheet.appendChild(label);
-    });
+    look(row);
+    let target = new THREE.Vector3(0, 0.5, 0), dist = 3.4;
+    if (row.startsWith('face')) {
+      target = eyes.isEmpty() ? new THREE.Vector3(c.x, box.min.y + size.y * 0.78, c.z) : eyes.getCenter(new THREE.Vector3());
+      dist = 0.95;
+    }
+    const dir = row === 'side' ? new THREE.Vector3(1, 0.18, 0) : new THREE.Vector3(0, 0.12, 1); // shiny: from the front
+    camera.position.copy(target).addScaledVector(dir.normalize(), dist);
+    camera.lookAt(target);
+    const px = x * cell, py = (rowsHigh - 1 - y) * cell;
+    renderer.setViewport(px, py, cell, cell);
+    renderer.setScissor(px, py, cell, cell);
+    renderer.render(scene, camera);
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.style.left = `${x * cell + 6}px`;
+    label.style.top = `${y * cell + 6}px`;
+    label.textContent = text;
+    sheet.appendChild(label);
     look('face');
-  });
+  }
+  if (compact) strip.forEach(([name, row], x) => tile(name, row, x, 0, SMALL, 1, x === 0 ? meta.id : row === 'shiny' ? 'shiny' : `${name}, ${row}`));
+  else shown.forEach((name, x) => rows.forEach((row, y) => tile(name, row, x, y, CELL, rows.length, y === 0 ? `${name} ${clips[name].duration.toFixed(2)}s` : row)));
   const title = document.createElement('div');
   title.id = 'title';
   title.textContent = `${meta.id ?? url} · ${meta.src ?? ''} ${meta.folder ?? ''} · ${tris} tris`;
-  sheet.appendChild(title);
+  if (!compact) sheet.appendChild(title);
   window.result = result;
 </script>
 </body>

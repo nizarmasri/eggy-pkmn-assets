@@ -33,30 +33,38 @@ const browser = await chromium.launch({
   args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
 });
 fs.mkdirSync(rendersDir, { recursive: true });
+// RENDER_CLOSEUPS=<regex>: every model gets the compact strip the contact sheets are made of
+// (render/index.html ?compact=1, saved as strip-<id>.jpg), and only the ids it matches the full sheet
+// with the variant rows. Without it, every model gets the full sheet.
+const closeups = process.env.RENDER_CLOSEUPS ? new RegExp(process.env.RENDER_CLOSEUPS) : null;
 const jobs = [
   ...fs.readdirSync(outDir).filter((f) => f.endsWith('.glb') && !f.endsWith('.shiny.glb')).map((f) => ['out', f]),
   ...(fs.existsSync(reviewDir) ? fs.readdirSync(reviewDir).filter((f) => f.endsWith('.glb')).map((f) => ['review', f]) : []),
-];
+].flatMap(([dir, file]) => {
+  const name = file.replace(/\.glb$/, '');
+  if (!closeups) return [[dir, file, false]];
+  return [[dir, file, true], ...(closeups.test(name) ? [[dir, file, false]] : [])];
+});
 const checks = {};
 let bad = 0;
-for (const [dir, file] of jobs) {
+for (const [dir, file, compact] of jobs) {
   const name = file.replace(/\.glb$/, '');
   const reportPath = rawDir && path.join(rawDir, `${name}.json`);
   const r = reportPath && fs.existsSync(reportPath) ? JSON.parse(fs.readFileSync(reportPath, 'utf8')) : {};
   const meta = { id: name, src: r.src, folder: r.folder, hit: r.hit };
   // RENDER_VARIANTS=1: four more face rows (see render/index.html) to tell what a look comes from.
-  const variants = process.env.RENDER_VARIANTS === '1';
+  const variants = process.env.RENDER_VARIANTS === '1' || (closeups && !compact);
   const shiny = dir === 'out' && fs.existsSync(path.join(outDir, `${name}.shiny.glb`)) ? `/out/${name}.shiny.glb` : null;
   const rowCount = 3 + (shiny ? 1 : 0) + (variants ? 4 : 0);
-  const page = await browser.newPage({ viewport: { width: 2400, height: 300 * rowCount } });
+  const page = await browser.newPage({ viewport: compact ? { width: 960, height: 240 } : { width: 2400, height: 300 * rowCount } });
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
-  await page.goto(`http://127.0.0.1:${port}/render/index.html?model=/${dir}/${file}&meta=${encodeURIComponent(JSON.stringify(meta))}${variants ? '&variants=1' : ''}${shiny ? `&shiny=${encodeURIComponent(shiny)}` : ''}`);
+  await page.goto(`http://127.0.0.1:${port}/render/index.html?model=/${dir}/${file}&meta=${encodeURIComponent(JSON.stringify(meta))}${variants ? '&variants=1' : ''}${compact ? '&compact=1' : ''}${shiny ? `&shiny=${encodeURIComponent(shiny)}` : ''}`);
   try {
     await page.waitForFunction(() => window.result, null, { timeout: 180000 });
     const result = await page.evaluate(() => window.result);
-    await page.locator('#sheet').screenshot({ path: path.join(rendersDir, `${name}.jpg`), type: 'jpeg', quality: 82 });
+    await page.locator('#sheet').screenshot({ path: path.join(rendersDir, `${compact ? 'strip-' : ''}${name}.jpg`), type: 'jpeg', quality: 82 });
     // The idle loop must stand on the floor (y = 0), 1 tall, centred on x and z, as three.js poses it.
     const env = result.idleEnvelope;
     const problems = [];
@@ -64,7 +72,7 @@ for (const [dir, file] of jobs) {
     if (Math.abs(env.max[1] - env.min[1] - 1) > 0.03) problems.push(`idle height ${(env.max[1] - env.min[1]).toFixed(3)}`);
     for (const axis of [0, 2]) if (Math.abs(env.min[axis] + env.max[axis]) / 2 > 0.03) problems.push(`idle off centre on ${'xyz'[axis]}`);
     for (const [clip, c] of Object.entries(result.clips)) if (!c.finite) problems.push(`${clip} has non-finite positions`);
-    checks[name] = { ...result, errors, problems };
+    if (compact || !closeups) checks[name] = { ...result, errors, problems };
     if (problems.length || errors.length) bad++;
     console.log(`${name}: ${problems.length || errors.length ? `PROBLEMS ${[...problems, ...errors].join('; ')}` : 'ok'} (${Object.keys(result.clips).join(' ')})`);
   } catch (e) {
