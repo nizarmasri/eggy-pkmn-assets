@@ -30,9 +30,12 @@ namespace Eggy.Conv
         }
 
         // Also a gas drawn with NonDirectional (Gastly's smoke): a sphere around the body that the game renders as a
-        // haze; drawn as a surface it hid Gastly's face. Added on as a glow, the face shows through it.
+        // haze; drawn as a surface it hid Gastly's face. Added on as a glow, the face shows through it. And what the
+        // Transparent shader adds onto the scene (alphaType Add: Elekid's thunder, Cresselia's rings), which drawn as
+        // a surface showed the dark colour of its empty texels.
         static bool IsGlow(MaterialData m) => (m.Shader == "Unlit" && (Hdr(m) || GlowName.IsMatch(m.Name)))
-            || (m.Shader == "NonDirectional" && SmokeName.IsMatch(m.Name));
+            || (m.Shader == "NonDirectional" && SmokeName.IsMatch(m.Name))
+            || (m.Shader == "Transparent" && m.AlphaType == "Add");
         static readonly System.Text.RegularExpressions.Regex SmokeName = new(@"smoke|gas", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
         // A glow's colour, baked again for additive drawing. PME's bake spills a layer's over-bright excess into
@@ -83,6 +86,52 @@ namespace Eggy.Conv
                 n++;
             }
             return n;
+        }
+
+        // The Transparent shader's blended materials (Spiritomb's vortex, Flygon's eye lenses, Venomoth's eyes).
+        // PME blends only an alphaType naming Transparent, and these say BlendPreMultiAlpha or Blend, so they came
+        // out solid: Spiritomb's vortex an opaque disc in front of its face. The shader fades with the view angle,
+        // from FresnelAlphaMin face on to FresnelAlphaMax edge on, past FresnelAngleBias; the game draws one alpha
+        // for the whole material, so it gets that fade averaged over a sphere's visible surface (Spiritomb's 0 to
+        // 0.5 past 0.3: 0.27). A material stays solid when neither the fade nor its texture leaves anything to see
+        // through (Deoxys's crystal, 1 to 1 over a solid texture), since a blended part writes no depth.
+        public const float SeeThroughFade = 0.98f, SolidTexture = 0.97f;
+        public static int Translucent(ModelData model, Func<MaterialData, MaterialMapping> mapping, Dictionary<string, byte[]> textures)
+        {
+            int n = 0;
+            foreach (var m in model.Materials)
+            {
+                if (m.Shader != "Transparent" || m.AlphaType == null || m.AlphaType.IndexOf("Blend", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                var map = mapping(m);
+                if (map == null || map.AlphaBlend) continue;
+                float fade = FresnelAlpha(m);
+                bool textureSees = map.BaseColorTexture != null && textures.TryGetValue(map.BaseColorTexture, out var png)
+                    && PngRead.Is(png) && SolidShare(PngRead.Decode(png)) < SolidTexture;
+                if (fade >= SeeThroughFade && !textureSees) continue;
+                map.AlphaBlend = true;
+                if (fade < SeeThroughFade)
+                {
+                    var f = map.BaseColorFactor ?? new float[] { 1, 1, 1, 1 };
+                    map.BaseColorFactor = new[] { f[0], f[1], f[2], f[3] * fade };
+                }
+                n++;
+            }
+            return n;
+        }
+
+        // (1 - n.v) over a sphere's visible surface averages 1/3.
+        static float FresnelAlpha(MaterialData m)
+        {
+            if (!m.Floats.TryGetValue("FresnelAlphaMin", out var lo) || !m.Floats.TryGetValue("FresnelAlphaMax", out var hi)) return 1;
+            float bias = m.Floats.TryGetValue("FresnelAngleBias", out var b) ? Math.Clamp(b, 0f, 1f) : 0f;
+            return Math.Clamp(lo + (hi - lo) * (bias + (1 - bias) / 3f), 0f, 1f);
+        }
+
+        static float SolidShare(Bntx.Texture t)
+        {
+            int solid = 0, n = t.Width * t.Height;
+            for (int i = 0; i < n; i++) if (t.Rgba[i * 4 + 3] >= 250) solid++;
+            return n == 0 ? 1 : solid / (float)n;
         }
 
         // Legends Z-A (IkCharacter) layers, baked again one over the other. PME mixes the layers by their share of
