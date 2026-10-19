@@ -261,8 +261,8 @@ namespace Eggy.Conv
         static GfModel BdspModel(string dir, ModelData model, JsonObject report)
         {
             var mats = Bdsp.Materials(dir, report);
-            var shells = Bdsp.DropRimShells(dir, model, mats);
-            if (shells.Count > 0) report["bdspRimShellsLeftOut"] = new JsonArray(shells.Select(n => (JsonNode)n).ToArray());
+            var shells = Bdsp.Shells(dir, model, mats);
+            if (shells.Count > 0) report["bdspShells"] = new JsonArray(shells.Select(n => (JsonNode)n).ToArray());
             var names = model.Meshes.SelectMany(m => m.SubMeshes).Select(x => x.Material).Distinct().ToList();
             // Made once (the shiny pass reuses the base model's, with what the base pass set on them).
             if (model.Materials.Count == 0) model.Materials.AddRange(names.Select(n => new MaterialData { Name = n, Shader = Bdsp.Shader }));

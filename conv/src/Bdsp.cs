@@ -101,10 +101,18 @@ namespace Eggy.Conv
 
         static float F(string s) => float.Parse(s, System.Globalization.CultureInfo.InvariantCulture);
 
-        // Rim shells: a see-through copy of a part a few per cent larger, coloured by a tiny flat texture, which
-        // the game's shader shows only along the silhouette (a rim light). Drawn as a surface it hides the part
-        // inside it (Castform's faces in the sun, the rain and the snow), so it is left out. Returns what went.
-        public static List<string> DropRimShells(string dir, ModelData model, Dictionary<string, GfMaterial> mats)
+        // See-through shells over a body, as BDSP draws its Castform forms: Unity sorts its see-through parts by
+        // distance, and the face inside the shells comes out on top of them; three.js sorts them by where their
+        // objects stand (all at the model's root), so a shell can cover the face. Here, so that no order matters:
+        //   a rim shell (a copy of a part a few per cent larger, coloured by a tiny flat texture, which the game's
+        //   shader shows only along the silhouette) is left out;
+        //   of two shells in the same place with the same texture, the second is left out;
+        //   a shell with a body inside it that fills most of it (a gel or water hood over a face) is a veil:
+        //   its alpha is thinned (GfMaterials), and the body drawn solid shows through it.
+        // Returns what it did.
+        public const float VeilAlpha = 0.45f;
+
+        public static List<string> Shells(string dir, ModelData model, Dictionary<string, GfMaterial> mats)
         {
             var parts = new List<(MeshData Mesh, SubMeshData Sub, Vector3 Lo, Vector3 Hi)>();
             foreach (var mesh in model.Meshes)
@@ -114,31 +122,43 @@ namespace Eggy.Conv
                     foreach (int i in sub.Indices) { lo = Vector3.Min(lo, mesh.Positions[i]); hi = Vector3.Max(hi, mesh.Positions[i]); }
                     if (sub.Indices.Length > 0) parts.Add((mesh, sub, lo, hi));
                 }
-            var dropped = new List<string>();
+            const float e = 0.001f;
+            static bool Inside((MeshData, SubMeshData, Vector3 Lo, Vector3 Hi) q, (MeshData, SubMeshData, Vector3 Lo, Vector3 Hi) p) =>
+                p.Lo.X <= q.Lo.X + e && p.Lo.Y <= q.Lo.Y + e && p.Lo.Z <= q.Lo.Z + e && p.Hi.X >= q.Hi.X - e && p.Hi.Y >= q.Hi.Y - e && p.Hi.Z >= q.Hi.Z - e;
+            static Vector3 Ratio((MeshData, SubMeshData, Vector3 Lo, Vector3 Hi) outer, (MeshData, SubMeshData, Vector3 Lo, Vector3 Hi) inner) =>
+                (outer.Hi - outer.Lo) / Vector3.Max(inner.Hi - inner.Lo, new Vector3(1e-4f));
+            bool Blended(string mat) => mats.TryGetValue(mat, out var g) && g.Values.TryGetValue("BlendMode", out var bm) && bm >= 1;
+            string Colour(string mat) => mats.TryGetValue(mat, out var g) ? g.Maps.FirstOrDefault(m => m.Sampler == "Col0Tex").Texture : null;
+
+            var notes = new List<string>();
+            var gone = new HashSet<SubMeshData>();
             foreach (var p in parts)
             {
-                if (!mats.TryGetValue(p.Sub.Material, out var gm) || !(gm.Values.TryGetValue("BlendMode", out var bm) && bm >= 1)) continue;
-                var col = gm.Maps.FirstOrDefault(m => m.Sampler == "Col0Tex").Texture;
+                if (!Blended(p.Sub.Material)) continue;
+                var col = Colour(p.Sub.Material);
                 int width = col != null ? PngWidth(Path.Combine(dir, col + ".png")) : 0;
-                if (width == 0 || width > 64) continue;
-                var size = p.Hi - p.Lo;
-                bool shell = parts.Any(q =>
-                {
-                    if (q.Sub == p.Sub || q.Sub.Material == p.Sub.Material) return false;
-                    var inner = Vector3.Max(q.Hi - q.Lo, new Vector3(1e-4f));
-                    const float e = 0.001f;
-                    bool inside = p.Lo.X <= q.Lo.X + e && p.Lo.Y <= q.Lo.Y + e && p.Lo.Z <= q.Lo.Z + e
-                        && p.Hi.X >= q.Hi.X - e && p.Hi.Y >= q.Hi.Y - e && p.Hi.Z >= q.Hi.Z - e;
-                    var ratio = size / inner;
-                    return inside && Math.Max(ratio.X, Math.Max(ratio.Y, ratio.Z)) <= 1.1f;
-                });
-                if (!shell) continue;
+                bool rim = width > 0 && width <= 64 && parts.Any(q => q.Sub != p.Sub && q.Sub.Material != p.Sub.Material && !gone.Contains(q.Sub)
+                    && Inside(q, p) && MaxOf(Ratio(p, q)) <= 1.1f);
+                bool twin = !rim && parts.Any(q => q.Sub != p.Sub && !gone.Contains(q.Sub) && parts.IndexOf(q) < parts.IndexOf(p) && Blended(q.Sub.Material)
+                    && Colour(q.Sub.Material) == col && Vector3.Distance(q.Lo, p.Lo) < e && Vector3.Distance(q.Hi, p.Hi) < e);
+                if (!rim && !twin) continue;
+                gone.Add(p.Sub);
                 p.Mesh.SubMeshes.Remove(p.Sub);
-                dropped.Add($"{p.Mesh.Name}/{p.Sub.Material}");
+                notes.Add($"{p.Mesh.Name}/{p.Sub.Material}: {(rim ? "rim shell" : "second copy of a shell")}, left out");
             }
             model.Meshes.RemoveAll(m => m.SubMeshes.Count == 0);
-            return dropped;
+            foreach (var p in parts)
+            {
+                if (gone.Contains(p.Sub) || !Blended(p.Sub.Material) || !mats.TryGetValue(p.Sub.Material, out var gm)) continue;
+                var body = parts.FirstOrDefault(q => q.Sub != p.Sub && !gone.Contains(q.Sub) && Inside(q, p) && MaxOf(Ratio(p, q)) > 1.1f && MaxOf(Ratio(p, q)) <= 2f);
+                if (body.Sub == null) continue;
+                gm.Values["Veil"] = VeilAlpha;
+                notes.Add($"{p.Mesh.Name}/{p.Sub.Material}: a veil over {body.Sub.Material}, alpha x{VeilAlpha}");
+            }
+            return notes;
         }
+
+        static float MaxOf(Vector3 v) => Math.Max(v.X, Math.Max(v.Y, v.Z));
 
         static int PngWidth(string file)
         {

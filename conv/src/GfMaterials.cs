@@ -147,6 +147,9 @@ namespace Eggy.Conv
                         Put(glow, p, new Vector4(c.X * k, c.Y * k, c.Z * k, 1));
                     }
                 }
+                // A BDSP veil (Bdsp.Shells): a see-through shell over a body, thinned so the body shows through.
+                bool veiled = m.ShaderGroup == Bdsp.Shader && m.Values.TryGetValue("Veil", out var veil) && m.Values.TryGetValue("BlendMode", out var vbm) && vbm >= 1;
+                if (veiled) for (int i = 0; i < w * h; i++) color[i * 4 + 3] = (byte)Math.Round(color[i * 4 + 3] * veil);
                 string key = m.Name + "_color.png";
                 result.Textures[key] = Png.Encode(color, w, h);
                 map.BaseColorTexture = key;
@@ -162,7 +165,7 @@ namespace Eggy.Conv
                 {
                     map.AlphaBlend = m.Values.TryGetValue("BlendMode", out var bm) && bm >= 1;
                     map.DoubleSided = m.Values.TryGetValue("CullMode", out var cm) && cm == 0;
-                    if (map.AlphaBlend)
+                    if (map.AlphaBlend && !veiled)
                     {
                         // Unity blends whole parts (Castform's heads, eyes, mouths) that are solid or cut out: drawn
                         // blended, three.js sorts them by their origin and a face can cover its own eyes. A colour
