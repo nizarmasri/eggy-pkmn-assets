@@ -139,7 +139,9 @@ namespace Eggy.Conv
                 int width = col != null ? PngWidth(Path.Combine(dir, col + ".png")) : 0;
                 bool rim = width > 0 && width <= 64 && parts.Any(q => q.Sub != p.Sub && q.Sub.Material != p.Sub.Material && !gone.Contains(q.Sub)
                     && Inside(q, p) && MaxOf(Ratio(p, q)) <= 1.1f);
-                bool twin = !rim && parts.Any(q => q.Sub != p.Sub && !gone.Contains(q.Sub) && parts.IndexOf(q) < parts.IndexOf(p) && Blended(q.Sub.Material)
+                // (Only shells over a body: two coincident copies of anything else, like a wing's two sides, stay.)
+                bool overBody = parts.Any(q => q.Sub != p.Sub && Inside(q, p) && MaxOf(Ratio(p, q)) > 1.1f && MaxOf(Ratio(p, q)) <= 2f);
+                bool twin = !rim && overBody && parts.Any(q => q.Sub != p.Sub && !gone.Contains(q.Sub) && parts.IndexOf(q) < parts.IndexOf(p) && Blended(q.Sub.Material)
                     && Colour(q.Sub.Material) == col && Vector3.Distance(q.Lo, p.Lo) < e && Vector3.Distance(q.Hi, p.Hi) < e);
                 if (!rim && !twin) continue;
                 gone.Add(p.Sub);
