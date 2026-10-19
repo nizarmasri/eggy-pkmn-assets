@@ -148,7 +148,8 @@ namespace Eggy.Conv
                     }
                 }
                 // A BDSP veil (Bdsp.Shells): a see-through shell over a body, thinned so the body shows through.
-                bool veiled = m.ShaderGroup == Bdsp.Shader && m.Values.TryGetValue("Veil", out var veil) && m.Values.TryGetValue("BlendMode", out var vbm) && vbm >= 1;
+                float veil = 1;
+                bool veiled = m.ShaderGroup == Bdsp.Shader && m.Values.TryGetValue("Veil", out veil) && m.Values.TryGetValue("BlendMode", out var vbm) && vbm >= 1;
                 if (veiled) for (int i = 0; i < w * h; i++) color[i * 4 + 3] = (byte)Math.Round(color[i * 4 + 3] * veil);
                 string key = m.Name + "_color.png";
                 result.Textures[key] = Png.Encode(color, w, h);
