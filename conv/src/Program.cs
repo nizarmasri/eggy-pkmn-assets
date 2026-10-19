@@ -14,13 +14,14 @@ namespace Eggy.Conv
     {
         public string Id { get; set; }
         public int Dex { get; set; }
-        public string Src { get; set; }      // sv | za | la | swsh | lgpe
+        public string Src { get; set; }      // sv | za | la | swsh | lgpe | bdsp
         public string Folder { get; set; }   // pm0025_00_00, pm0006_00 ... (also the files' name prefix)
         public string ModelDir { get; set; }
         public string AnimDir { get; set; }
         public bool Shiny { get; set; }      // the folder has a shiny (_rare) material set
         public string Variant { get; set; }  // Arceus: the type whose material set this model wears
         public string Female { get; set; }   // the base id of a female model
+        public string ShinyDir { get; set; } // BDSP: the shiny bundle's folder (its _rare materials and textures)
         public bool IsGf => Src == "swsh" || Src == "lgpe";
     }
 

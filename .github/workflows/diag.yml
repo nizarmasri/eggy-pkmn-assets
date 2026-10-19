@@ -18,7 +18,7 @@ on:
         default: 'lucario@za'
       bdsp:
         description: BDSP model folders to try through the Unity path (space separated)
-        default: 'pm0165_00_00 pm0165_00_01 pm0351_12_00'
+        default: 'pm0165_00_00 pm0165_00_01 pm0351_11_00 pm0351_12_00'
       arenas:
         description: Build and draw the arenas too
         type: boolean
@@ -146,6 +146,7 @@ jobs:
 
   bdsp:
     if: inputs.bdsp != ''
+    needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -159,7 +160,18 @@ jobs:
         working-directory: pipeline
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 9.0.x
+          dotnet-version: |
+            8.0.x
+            9.0.x
+      - name: PokeModelExporter at a pinned commit, and the converter
+        run: |
+          git init -q vendor/pme
+          git -C vendor/pme fetch -q --depth 1 "$PME_REPO" "$PME_SHA"
+          git -C vendor/pme checkout -q FETCH_HEAD
+          dotnet build conv/EggyConv.csproj -c Release -o work/conv --nologo -clp:ErrorsOnly
+      - uses: actions/download-artifact@v4
+        with:
+          name: diag-plan
       - uses: actions/cache/restore@v4
         with:
           path: cache/bdsp
@@ -203,10 +215,16 @@ jobs:
           grep -v '^      ' diag/bdsp-glb.txt | head -200
           for d in work/out/*/; do
             n=$(basename "$d")
-            cp "$d/$n.glb" diag/ 2>/dev/null || true
-            (cd "$d" && ls -la) > "diag/bdsp-files-$n.txt"
+            (cd "$d" && ls -la . materials) > "diag/bdsp-files-$n.txt"
             for f in "$d"/*.log; do if [ -f "$f" ]; then cp "$f" "diag/bdsp-$n-$(basename "$f")"; fi; done
           done
+      - name: Convert, optimise and draw what the Unity path made
+        run: |
+          node pipeline/bdsp/jobs.mjs work/plan.json work/out work/bdsp-jobs.json
+          dotnet work/conv/eggyconv.dll work/bdsp-jobs.json work/raw --diag work/diag
+          node pipeline/optimize.mjs work/raw out work/review || true
+          RENDER_VARIANTS=1 node pipeline/render.mjs out work/review work/renders work/raw || true
+          cp work/renders/*.jpg work/raw/*.json work/diag/* diag/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:

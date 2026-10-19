@@ -58,11 +58,11 @@ namespace Eggy.Conv
             {
                 if (name == null || name == "dummy_col" || name.StartsWith("projection_effect") || name.StartsWith("viewport_mask")) return null;
                 if (decoded.TryGetValue(name, out var t)) return t;
-                var bytes = read(name + ".bntx") ?? read(name);
+                var bytes = read(name + ".bntx") ?? read(name + ".png") ?? read(name);
                 if (bytes == null) { formats[name] = "missing"; return decoded[name] = null; }
                 try
                 {
-                    t = Bntx.Read(bytes);
+                    t = PngRead.Is(bytes) ? PngRead.Decode(bytes) : Bntx.Read(bytes);
                     formats[name] = $"0x{t.Format:X4} {t.Width}x{t.Height}";
                     if (debugDir != null) File.WriteAllBytes(Path.Combine(debugDir, $"tex_{name}.png"), Png.Encode(Bntx.Mapped(t), t.Width, t.Height));
                     return decoded[name] = t;
@@ -155,8 +155,26 @@ namespace Eggy.Conv
                     map.EmissiveTexture = m.Name + "_emission.png";
                 }
                 if (debugDir != null) DebugSheet(gm, m, col, layer, debugDir);
+                // Brilliant Diamond / Shining Pearl (Bdsp.cs): Unity's blend and cull settings, and a tangent-space
+                // normal map used as it is where it covers the mesh's UVs once.
+                if (m.ShaderGroup == Bdsp.Shader)
+                {
+                    map.AlphaBlend = m.Values.TryGetValue("BlendMode", out var bm) && bm >= 1;
+                    map.DoubleSided = m.Values.TryGetValue("CullMode", out var cm) && cm == 0;
+                }
                 var nor = On("NormalMapEnable") ? Slot(m, "NormalMapTex", "NormalMap") : null;
-                if (nor != null)
+                var norName = m.Maps.FirstOrDefault(x => x.Sampler == "NormalMapTex").Texture;
+                if (nor != null && norName != null && norName.EndsWith("_nor_ts"))
+                {
+                    if (Whole(nor.Scale.X) == 1 && Whole(nor.Scale.Y) == 1 && nor.Scale == Vector2.One && nor.Translate == Vector2.Zero)
+                    {
+                        string key2 = norName + ".png";
+                        if (!result.Textures.ContainsKey(key2)) result.Textures[key2] = Png.Encode(Bdsp.TangentNormal(nor.Tex), nor.Tex.Width, nor.Tex.Height);
+                        map.NormalTexture = key2;
+                        normals[m.Name] = new JsonObject { ["texture"] = norName, ["tangentSpace"] = true, ["used"] = true };
+                    }
+                }
+                else if (nor != null)
                 {
                     var how = BakeNormal(gm, m, nor, bottomOrigin, result, map);
                     if (how != null) normals[m.Name] = how;

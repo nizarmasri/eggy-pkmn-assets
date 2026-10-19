@@ -408,7 +408,12 @@ namespace Eggy.Conv
                     bool fogMask = t2 != null && t2.Tex.Contains("fogmask");
                     k.Baked.Add((t2, fogMask ? "screen" : blend switch { 2 => "multiply", 1 => "add", _ => "over" }));
                 }
-                if (m.Maps.ContainsKey("LightMask_uv1")) k.Baked.Add((MakeSlot(m, "LightMask_uv1", 1, null), "multiply"));
+                if (m.Maps.ContainsKey("LightMask_uv1"))
+                {
+                    // The light mask slot holds the fog mask on the sea's far islands and cliffs: screened too.
+                    var lm = MakeSlot(m, "LightMask_uv1", 1, null);
+                    k.Baked.Add((lm, lm != null && lm.Tex.Contains("fogmask") ? "screen" : "multiply"));
+                }
             }
             else if (g.StartsWith("FieldGrassShader") || g == "FieldWindowShader")
             {
@@ -513,17 +518,21 @@ namespace Eggy.Conv
                     if (k.Drop) { notes.Add($"{part}/{m.Name} ({m.Group}) left out: {k.Note}"); continue; }
                     if (k.Note != null) notes.Add($"{part}/{m.Name} ({m.Group}): {k.Note}");
                 }
-                foreach (var srcMesh in stage.Meshes)
+                // Baked masks get vertices where they need them, the whole part at once (ArenaRefine).
+                var cuts = new Dictionary<string, int>();
+                var refinedMeshes = RefinePart(stage.Meshes, looks, store, ref budget, cuts);
+                foreach (var (name, n) in cuts) refined[$"{part.Substring(4)}:{name}"] = n;
+                for (int si = 0; si < stage.Meshes.Count; si++)
                 {
-                    foreach (var (matIndex, srcIdx) in srcMesh.Polys)
+                    var srcMesh = stage.Meshes[si];
+                    var (mesh, polyIdx) = refinedMeshes[si];
+                    for (int pi = 0; pi < srcMesh.Polys.Count; pi++)
                     {
+                        var (matIndex, srcIdx) = srcMesh.Polys[pi];
                         if (matIndex < 0 || matIndex >= stage.Mats.Count || srcIdx.Length == 0) continue;
                         var m = stage.Mats[matIndex]; var k = looks[matIndex];
                         if (k.Drop) continue;
-                        // Baked masks get vertices where they need them (ArenaRefine).
-                        int before = budget;
-                        var (mesh, idx) = Refine(srcMesh, srcIdx, k, store, ref budget);
-                        if (budget < before) refined[$"{part.Substring(4)}:{m.Name}"] = before - budget;
+                        var idx = polyIdx[pi];
                         string matName = $"{part.Substring(4)}:{m.Name}";
                         if (k.Overlay == null) { Emit(b, store, mesh, idx, m, k, matName, false, false, part, near, vstats); continue; }
                         // Two-layer ground: triangles all of the second layer are drawn with it, opaque; triangles
@@ -603,7 +612,18 @@ namespace Eggy.Conv
             if (Math.Abs(h0) > 1e-4f)
                 foreach (var mesh in b.Model.Meshes) for (int i = 0; i < mesh.Positions.Length; i++) mesh.Positions[i].Y -= h0;
 
-            // ---- Decals: see-through layers lying on the ground (grass edges, painted marks) ----
+            // ---- Where each material sits (to tell which one a sheet shows), then decals ----
+            foreach (var entry in b.Plan.OfType<JsonObject>())
+            {
+                string named = entry["name"].GetValue<string>();
+                var lo = new Vector3(float.MaxValue); var hi = new Vector3(float.MinValue); int count = 0;
+                foreach (var mesh in b.Model.Meshes)
+                    foreach (var sub in mesh.SubMeshes.Where(x => x.Material == named))
+                        foreach (int v in sub.Indices) { lo = Vector3.Min(lo, mesh.Positions[v]); hi = Vector3.Max(hi, mesh.Positions[v]); count++; }
+                if (count == 0) continue;
+                entry["tris"] = count / 3;
+                entry["box"] = new JsonArray(R(lo.X), R(lo.Y), R(lo.Z), R(hi.X), R(hi.Y), R(hi.Z));
+            }
             foreach (var entry in b.Plan.OfType<JsonObject>())
             {
                 if (entry["role"] != null || entry["alpha"]?.GetValue<string>() != "BLEND") continue;
