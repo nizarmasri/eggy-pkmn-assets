@@ -197,13 +197,12 @@ jobs:
           cli=$(find tools/asm -type f -name AssetStudioModCLI | head -1)
           fbx=$(find tools/fbx -type f -name 'FBX2glTF-*' -not -name '*.txt' | head -1)
           chmod +x "$cli" "$fbx"
-          # The same CLI built from its tag with AnimationClip among the types animator mode reads.
+          # The same CLI built from its tag with two patches (pipeline/bdsp/patch-asm.mjs): clips in animator
+          # mode, and Unity Euler curves turned through a quaternion.
           git init -q tools/asm-src
           git -C tools/asm-src fetch -q --depth 1 "$ASM_REPO" "$ASM_SHA"
           git -C tools/asm-src checkout -q FETCH_HEAD
-          o=tools/asm-src/AssetStudioCLI/Options/CLIOptions.cs
-          perl -0pi -e 's/(ClassIDType\.Animator,\s*ClassIDType\.Mesh,\s*ClassIDType\.Texture2D,)/$1\n                            ClassIDType.AnimationClip,/' "$o"
-          grep -n -A4 'ClassIDType.Animator,$' "$o" | head -8
+          node pipeline/bdsp/patch-asm.mjs tools/asm-src
           dotnet build tools/asm-src/AssetStudioCLI/AssetStudioCLI.csproj -c Release -f net9.0 -r linux-x64 --self-contained false -o tools/asm-build --nologo -clp:ErrorsOnly
           find tools/asm -maxdepth 3 | head -30
           find tools/asm -name '*.so' -exec cp -n {} tools/asm-build/ \;

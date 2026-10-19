@@ -192,7 +192,7 @@ jobs:
         with:
           path: cache/bdsp
           key: bdsp-src-${{ github.run_id }}
-      - name: AssetStudio (built from its tag with clips in animator mode) and FBX2glTF
+      - name: AssetStudio (built from its tag, patched by pipeline/bdsp/patch-asm.mjs) and FBX2glTF
         run: |
           mkdir -p tools
           curl -fsSL "$ASM_URL" -o tools/asm.zip && unzip -q tools/asm.zip -d tools/asm
@@ -200,9 +200,7 @@ jobs:
           git init -q tools/asm-src
           git -C tools/asm-src fetch -q --depth 1 "$ASM_REPO" "$ASM_SHA"
           git -C tools/asm-src checkout -q FETCH_HEAD
-          o=tools/asm-src/AssetStudioCLI/Options/CLIOptions.cs
-          perl -0pi -e 's/(ClassIDType\.Animator,\s*ClassIDType\.Mesh,\s*ClassIDType\.Texture2D,)/$1\n                            ClassIDType.AnimationClip,/' "$o"
-          grep -q 'ClassIDType.Texture2D,\s*$' "$o"
+          node pipeline/bdsp/patch-asm.mjs tools/asm-src
           dotnet build tools/asm-src/AssetStudioCLI/AssetStudioCLI.csproj -c Release -f net9.0 -r linux-x64 --self-contained false -o tools/asm-build --nologo -clp:ErrorsOnly
           find tools/asm -name '*.so' -exec cp -n {} tools/asm-build/ \;
       - name: The Unity path, then the converter
