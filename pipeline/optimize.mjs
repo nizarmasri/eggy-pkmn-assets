@@ -74,6 +74,8 @@ for (const file of reports) {
     report[name] = r;
     continue;
   }
+  // One model that fails is reported and left out; the rest of the shard goes on.
+  try {
   // Textures at 1024 px at most, and smaller still when that leaves the GLB over the 3 MB budget.
   let doc, root, glb;
   for (const size of [1024, 768, 512, 384]) {
@@ -117,7 +119,8 @@ for (const file of reports) {
   if (review) continue;
 
   const sha256 = crypto.createHash('sha256').update(glb).digest('hex');
-  const shiny = r.shiny?.file ? await companion(r.id, new Set(root.listMaterials().map((m) => m.getName()))) : null;
+  const shinyNotes = [];
+  const shiny = r.shiny?.file ? await companion(r.id, new Set(root.listMaterials().map((m) => m.getName())), shinyNotes) : null;
   models[r.id] = {
     file: `${r.id}.glb`,
     bytes: glb.length,
@@ -133,13 +136,20 @@ for (const file of reports) {
     const size = t.getSize();
     return `${t.getMimeType()} ${size?.join('x')} ${(t.getImage()?.byteLength / 1024).toFixed(0)} KB`;
   });
-  report[r.id] = { ...r, bytes: glb.length, textures };
+  report[r.id] = { ...r, bytes: glb.length, textures, ...(shinyNotes.length ? { shinyNotes } : {}) };
   console.log(`${r.id}: ${(r.rawBytes / 1e6).toFixed(1)} MB raw -> ${(glb.length / 1e6).toFixed(2)} MB, ${r.tris} tris, ${r.bones} bones`);
+  } catch (e) {
+    const error = `optimise: ${e.message}`;
+    console.log(`${name}: FAILED ${error}`);
+    failures.push(`${name}: ${error}`);
+    report[name] = { ...r, error };
+    delete models[r.id];
+  }
 }
 
 // The shiny companion: its materials as the base's are made, WebP textures, named after the base's.
 // A base material the converter split off for an inverted hull ("hull <name>") gets its shiny copy too.
-async function companion(id, baseNames) {
+async function companion(id, baseNames, notes) {
   const doc = await io.read(path.join(rawDir, `${id}.shiny.glb`));
   const root = doc.getRoot();
   materials(root);
@@ -151,8 +161,13 @@ async function companion(id, baseNames) {
       root.listMeshes()[0].listPrimitives()[0].clone().setMaterial(copy)));
     root.listScenes()[0].addChild(node);
   }
-  const missing = root.listMaterials().map((m) => m.getName()).filter((n) => !baseNames.has(n));
-  if (missing.length) throw new Error(`${id}.shiny.glb: materials not in the base model: ${missing.join(', ')}`);
+  // A material the base model does not draw (its mesh was left out there) has nothing to swap into.
+  for (const mat of [...root.listMaterials()]) {
+    if (baseNames.has(mat.getName())) continue;
+    notes.push(`${mat.getName()}: not in the base model, left out of the shiny`);
+    mat.dispose();
+  }
+  if (!root.listMaterials().length) return null;
   for (const list of [root.listNodes(), root.listMeshes(), root.listTextures()]) for (const item of list) item.setExtras({});
   await doc.transform(
     prune({ keepLeaves: true }),
