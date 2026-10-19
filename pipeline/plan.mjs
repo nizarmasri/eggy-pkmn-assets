@@ -52,6 +52,26 @@ function pickFolder(game, e) {
   return null;
 }
 
+// A Scarlet/Violet form's materials can point into a sibling folder for their textures (East Shellos and
+// Gastrodon: ../pm0422_11_00/pm0422_12_00_body_alb.bntx): its own-named files from any sibling, and when the
+// form folder has no textures of its own, every texture of its siblings (the converter finds files by name).
+function borrowed(game, f) {
+  if (GAMES[game].format === 'gf') return [];
+  const own = `${f.folder}_`;
+  const noTextures = ![...f.model.keys()].some((n) => n.endsWith('.bntx'));
+  const out = [];
+  const seen = new Set(f.model.keys());
+  for (const s of index[game].values()) {
+    if (s.dex !== f.dex || s.folder === f.folder) continue;
+    for (const [file, { zip, entry }] of s.model)
+      if (!seen.has(file) && wantsFile(game, 'model', file) && (file.startsWith(own) || (noTextures && file.endsWith('.bntx')))) {
+        seen.add(file);
+        out.push({ kind: 'model', file, zip, ...entry });
+      }
+  }
+  return out;
+}
+
 const chosen = new Map(); // base id -> game, so a female or a form comes from the same game when it can
 function plan(e) {
   const base = e.female ?? e.id.split('-')[0];
@@ -64,7 +84,7 @@ function plan(e) {
       [...f[kind].entries()]
         .filter(([file]) => wantsFile(game, kind, file))
         .map(([file, { zip, entry }]) => ({ kind, file, zip, ...entry }));
-    const entries = [...take('model'), ...take('anim')];
+    const entries = [...take('model'), ...take('anim'), ...borrowed(game, f)];
     const shiny = entries.some((x) => /_rare[._]/.test(x.file));
     if (!e.female && !e.id.includes('-')) chosen.set(e.id, game);
     return { ...e, src: game, folder: f.folder, shiny, entries };
