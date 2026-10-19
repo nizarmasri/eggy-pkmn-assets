@@ -522,6 +522,23 @@ namespace Eggy.Conv
                 var cuts = new Dictionary<string, int>();
                 var refinedMeshes = RefinePart(stage.Meshes, looks, store, ref budget, cuts);
                 foreach (var (name, n) in cuts) refined[$"{part.Substring(4)}:{name}"] = n;
+                // A part with a sea: its see-through islands and rocks lose their mirrored copies under it.
+                float? seaLevel = null;
+                foreach (var mesh in stage.Meshes)
+                    foreach (var (mat, idx) in mesh.Polys)
+                        if (mat >= 0 && mat < stage.Mats.Count && stage.Mats[mat].Group == "FieldWaterShader01")
+                            foreach (int v in idx)
+                                if (v >= 0 && v < mesh.P.Length) seaLevel = Math.Max(seaLevel ?? float.MinValue, mesh.P[v].Y);
+                if (seaLevel is float seaY)
+                {
+                    var lost = new Dictionary<string, int>();
+                    bool Clips(int mat) => mat >= 0 && mat < looks.Count && !looks[mat].Drop && looks[mat].Role == null
+                        && looks[mat].Alpha == "BLEND" && !(stage.Mats[mat].Group ?? "").StartsWith("FieldWaterShader");
+                    // 10 cm of slack: foam and wave sheets lie on the water, a hair under it.
+                    refinedMeshes = ClipUnderWater(stage.Meshes, refinedMeshes, Clips, seaY - 0.1f, lost);
+                    if (lost.Count > 0)
+                        notes.Add($"{part}: under the sea (y < {seaY - 0.1f:F2}), see-through reflections left out: {string.Join(", ", lost.Select(x => $"{x.Key} {x.Value} tris"))}");
+                }
                 for (int si = 0; si < stage.Meshes.Count; si++)
                 {
                     var srcMesh = stage.Meshes[si];

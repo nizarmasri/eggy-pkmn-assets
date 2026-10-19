@@ -189,5 +189,76 @@ namespace Eggy.Conv
                 return (mesh, w.Polys.ToArray());
             }).ToList();
         }
+
+        // Let's Go's far islands and rocks carry their own reflection: a mirrored copy of the mesh under the
+        // sea, see-through, meant to be seen through the game's water. Eggy draws its water first and without
+        // depth (so what stands in it blends over it), and the copies hang under every island as dark green
+        // stripes; its water mirrors the sky itself. So in a part with a sea, see-through materials lose what
+        // lies under the water: triangles wholly under it go, triangles across it are cut at it. Returns the
+        // meshes as RefinePart does, and how many triangles each material lost.
+        static List<(GfMesh Mesh, int[][] Idx)> ClipUnderWater(List<GfMesh> src, List<(GfMesh Mesh, int[][] Idx)> meshes, Func<int, bool> clips, float level, Dictionary<string, int> report)
+        {
+            var outp = new List<(GfMesh, int[][])>();
+            for (int si = 0; si < meshes.Count; si++)
+            {
+                var (mesh, polys) = meshes[si];
+                List<Vector3> P = null, N = null; List<Vector4> C = null; List<Vector2>[] U = null;
+                var cuts = new Dictionary<(int, int), int>();
+                int Cut(int a, int b)
+                {
+                    var key = a < b ? (a, b) : (b, a);
+                    if (cuts.TryGetValue(key, out int v)) return v;
+                    float t = (level - P[key.Item1].Y) / (P[key.Item2].Y - P[key.Item1].Y);
+                    v = P.Count;
+                    var p = Vector3.Lerp(P[key.Item1], P[key.Item2], t);
+                    P.Add(new Vector3(p.X, level, p.Z));
+                    if (N != null) { var n = Vector3.Lerp(N[key.Item1], N[key.Item2], t); N.Add(n.LengthSquared() > 1e-12f ? Vector3.Normalize(n) : N[key.Item1]); }
+                    if (C != null) C.Add(Vector4.Lerp(C[key.Item1], C[key.Item2], t));
+                    for (int s = 0; s < 3; s++) if (U[s] != null) U[s].Add(Vector2.Lerp(U[s][key.Item1], U[s][key.Item2], t));
+                    return cuts[key] = v;
+                }
+                var next = (int[][])polys.Clone();
+                for (int pi = 0; pi < polys.Length; pi++)
+                {
+                    int mat = src[si].Polys[pi].Mat;
+                    var tris = polys[pi];
+                    if (!clips(mat) || tris.Any(v => v < 0 || v >= (P?.Count ?? mesh.P.Length))) continue;
+                    if (P == null)
+                    {
+                        P = mesh.P.ToList(); N = mesh.N?.ToList(); C = mesh.Col?.ToList();
+                        U = mesh.Uv.Select(u => u?.ToList()).ToArray();
+                    }
+                    var keep = new List<int>(tris.Length);
+                    int lost = 0;
+                    for (int t = 0; t + 2 < tris.Length; t += 3)
+                    {
+                        int[] c = { tris[t], tris[t + 1], tris[t + 2] };
+                        bool[] under = c.Select(v => P[v].Y < level).ToArray();
+                        int n = under.Count(u => u);
+                        if (n == 0) { keep.AddRange(c); continue; }
+                        lost++;
+                        if (n == 3) continue;
+                        // Walk the corners in order (Sutherland-Hodgman against the plane), keeping the winding.
+                        var poly = new List<int>(4);
+                        for (int e = 0; e < 3; e++)
+                        {
+                            int a = c[e], b = c[(e + 1) % 3];
+                            if (!under[e]) poly.Add(a);
+                            if (under[e] != under[(e + 1) % 3]) poly.Add(Cut(a, b));
+                        }
+                        for (int k = 1; k + 1 < poly.Count; k++) { keep.Add(poly[0]); keep.Add(poly[k]); keep.Add(poly[k + 1]); }
+                    }
+                    if (lost == 0) continue;
+                    next[pi] = keep.ToArray();
+                    string name = $"{mesh.Name}:{pi}";
+                    report[name] = (report.TryGetValue(name, out int had) ? had : 0) + lost;
+                }
+                if (P == null || P.Count == mesh.P.Length && next.SequenceEqual(polys)) { outp.Add((mesh, next)); continue; }
+                var m = new GfMesh { Name = mesh.Name, P = P.ToArray(), N = N?.ToArray(), Col = C?.ToArray() };
+                for (int s = 0; s < 3; s++) m.Uv[s] = U[s]?.ToArray();
+                outp.Add((m, next));
+            }
+            return outp;
+        }
     }
 }
