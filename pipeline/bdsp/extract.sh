@@ -54,7 +54,9 @@ for folder in "$@"; do
   mkdir -p "$dest/materials"
   find "$exp/materials" -type f -name '*.txt' -exec cp {} "$dest/materials/" \; 2>/dev/null
   mkdir -p "$dest/objects"
-  (cd "$exp/objects" 2>/dev/null && find . -type f -name '*.txt' | while read -r o; do cp "$o" "$dest/objects/$(echo "${o#./}" | tr '/' '~')"; done)
+  if [ -d "$exp/objects" ]; then
+    find "$exp/objects" -type f -name '*.txt' | while read -r o; do cp "$o" "$dest/objects/$(echo "${o#"$exp/objects/"}" | tr '/' '~')"; done
+  fi
   cp "$exp.info.log" "$dest/info.log"; cp "$exp.log" "$dest/animator.log"
   if ! "$fbx" --binary --verbose --input "$f" --output "$dest/$folder" > "$dest/fbx2gltf.log" 2>&1; then echo "$folder: FBX2glTF failed"; tail -5 "$dest/fbx2gltf.log"; continue; fi
   grep -iE "anim|take|stack" "$dest/fbx2gltf.log" | head -12
