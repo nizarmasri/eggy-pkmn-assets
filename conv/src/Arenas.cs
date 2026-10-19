@@ -836,6 +836,14 @@ namespace Eggy.Conv
                 ["doubleSided"] = k.DoubleSided,
                 ["rotate"] = slot != null && Math.Abs(slot.Rotate) > 1e-4f ? (JsonNode)slot.Rotate : null,
                 ["role"] = overlay ? "decal" : k.Role,
+                // What the game's material holds, for reading a shader this converter only approximates.
+                ["source"] = overlay || ground ? null : new JsonObject
+                {
+                    ["maps"] = new JsonObject(m.Maps.Select(x => KeyValuePair.Create(x.Key, (JsonNode)x.Value.Tex))),
+                    ["switches"] = new JsonArray(m.On.Where(x => x.Value).Select(x => (JsonNode)x.Key).ToArray()),
+                    ["ints"] = new JsonObject(m.I.Where(x => x.Value != 0).Select(x => KeyValuePair.Create(x.Key, (JsonNode)x.Value))),
+                    ["floats"] = new JsonObject(m.F.Where(x => Math.Abs(x.Value) > 1e-6f).Select(x => KeyValuePair.Create(x.Key, (JsonNode)R(x.Value)))),
+                },
             });
         }
 
