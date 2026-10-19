@@ -31,6 +31,7 @@ namespace Eggy.Conv
             public readonly Dictionary<string, byte[]> Textures = new Dictionary<string, byte[]>();
             public readonly Dictionary<string, MaterialMapping> Mappings = new Dictionary<string, MaterialMapping>();
             public readonly HashSet<string> Hidden = new HashSet<string>(); // materials the game does not draw
+            public readonly HashSet<string> Masks = new HashSet<string>();  // cut-outs (alpha tested) rather than blended
         }
 
         // How a GF shader places a texture: uv x scale + translate + base (form 4 of Transform), worked out on
@@ -161,6 +162,16 @@ namespace Eggy.Conv
                 {
                     map.AlphaBlend = m.Values.TryGetValue("BlendMode", out var bm) && bm >= 1;
                     map.DoubleSided = m.Values.TryGetValue("CullMode", out var cm) && cm == 0;
+                    if (map.AlphaBlend)
+                    {
+                        // Unity blends whole parts (Castform's heads, eyes, mouths) that are solid or cut out: drawn
+                        // blended, three.js sorts them by their origin and a face can cover its own eyes. A colour
+                        // with no partial alpha is drawn opaque, one with holes and no partial alpha cut out.
+                        int solid = 0, clear = 0, all = w * h;
+                        for (int i = 0; i < all; i++) { byte a = color[i * 4 + 3]; if (a >= 250) solid++; else if (a <= 5) clear++; }
+                        if (solid >= all * 0.995) map.AlphaBlend = false;
+                        else if (solid + clear >= all * 0.97) { map.AlphaBlend = false; result.Masks.Add(m.Name); }
+                    }
                 }
                 var nor = On("NormalMapEnable") ? Slot(m, "NormalMapTex", "NormalMap") : null;
                 var norName = m.Maps.FirstOrDefault(x => x.Sampler == "NormalMapTex").Texture;

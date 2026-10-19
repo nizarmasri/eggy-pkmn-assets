@@ -23,6 +23,9 @@ namespace Eggy.Conv
     public static class Bdsp
     {
         public const string Shader = "BdspPokeShader";
+        // FBX2glTF's units to metres: measured on Ledyba (0.0104 tall, 1.0 m in the Pokédex) and Castform
+        // (0.0035, 0.3 m).
+        public const float Unit = 100;
         static readonly Regex Float = new(@"string first = ""(_\w+)""\s+float second = ([-\d.eE+]+)");
         static readonly Regex Color = new(@"string first = ""(_\w+)""\s+ColorRGBA second\s+float r = ([-\d.eE+]+)\s+float g = ([-\d.eE+]+)\s+float b = ([-\d.eE+]+)\s+float a = ([-\d.eE+]+)");
         static readonly Regex Tex = new(@"string first = ""(_\w+)""\s+UnityTexEnv second\s+PPtr<Texture> m_Texture\s+int m_FileID = (-?\d+)\s+SInt64 m_PathID = (-?\d+)\s+Vector2f m_Scale\s+float x = ([-\d.eE+]+)\s+float y = ([-\d.eE+]+)\s+Vector2f m_Offset\s+float x = ([-\d.eE+]+)\s+float y = ([-\d.eE+]+)");

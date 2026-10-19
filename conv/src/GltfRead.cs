@@ -14,7 +14,9 @@ namespace Eggy.Conv
     // transform, every kept mesh in its rest pose (skinned vertices put through their bind so the skeleton's
     // rest pose is the bind pose; unskinned ones ride their node as a joint), one joint per node any skin
     // uses, and every animation as bone tracks in frames (30 per second). UVs come back with V from the
-    // bottom (Unity's way), as the Sword/Shield baker reads them.
+    // bottom (Unity's way), as the Sword/Shield baker reads them. Everything is scaled by `unit` (node and key
+    // translations, vertex positions) so the model is in metres: the optimiser's key tolerances are in metres,
+    // and FBX2glTF's centimetre-on-centimetre output (a Ledyba 0.01 tall) lost its idle bob to them.
     public static class GltfRead
     {
         public const float Fps = 30;
@@ -26,7 +28,7 @@ namespace Eggy.Conv
             public JsonObject Report = new();
         }
 
-        public static Result Read(string path, Func<string, string, bool> keepPrimitive)
+        public static Result Read(string path, Func<string, string, bool> keepPrimitive, float unit = 1)
         {
             var glb = File.ReadAllBytes(path);
             if (BitConverter.ToUInt32(glb, 0) != 0x46546C67) throw new InvalidDataException($"{path}: not a GLB");
@@ -193,7 +195,7 @@ namespace Eggy.Conv
                             J.Add(JointOf(ni)); J.Add(0); J.Add(0); J.Add(0);
                             W.Add(1); W.Add(0); W.Add(0); W.Add(0);
                         }
-                        P.Add(p);
+                        P.Add(p * unit);
                         N.Add(q.LengthSquared() > 1e-12f ? Vector3.Normalize(q) : Vector3.UnitY);
                         U0.Add(uv0 != null ? new Vector2(uv0[v * 2], 1 - uv0[v * 2 + 1]) : Vector2.Zero);
                         U1.Add(uv1 != null ? new Vector2(uv1[v * 2], 1 - uv1[v * 2 + 1]) : Vector2.Zero);
@@ -210,6 +212,8 @@ namespace Eggy.Conv
                 md.SubMeshes.AddRange(subs);
                 model.Meshes.Add(md);
             }
+            // The skeleton in metres too (after the meshes, which were put through it as it was).
+            foreach (var nd in model.Nodes) nd.Translation *= unit;
             res.Report["dropped"] = dropped;
             res.Report["joints"] = nextJoint;
 
@@ -239,7 +243,7 @@ namespace Eggy.Conv
                     switch (pathName)
                     {
                         case "translation":
-                            tr.Translation = new Keys<Vector3> { Times = frames, Values = frames.Select((_, k) => new Vector3(vals[(k * stride + off) * comps], vals[(k * stride + off) * comps + 1], vals[(k * stride + off) * comps + 2])).ToArray() };
+                            tr.Translation = new Keys<Vector3> { Times = frames, Values = frames.Select((_, k) => unit * new Vector3(vals[(k * stride + off) * comps], vals[(k * stride + off) * comps + 1], vals[(k * stride + off) * comps + 2])).ToArray() };
                             break;
                         case "scale":
                             tr.Scale = new Keys<Vector3> { Times = frames, Values = frames.Select((_, k) => new Vector3(vals[(k * stride + off) * comps], vals[(k * stride + off) * comps + 1], vals[(k * stride + off) * comps + 2])).ToArray() };

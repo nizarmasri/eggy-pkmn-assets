@@ -34,7 +34,7 @@ namespace Eggy.Conv
             if (job.Src == "bdsp")
             {
                 // Brilliant Diamond / Shining Pearl: the Unity path's GLB, its Unity materials baked as Sword/Shield's.
-                var g = GltfRead.Read(Path.Combine(job.ModelDir, job.Folder + ".glb"), Bdsp.KeepPrimitive);
+                var g = GltfRead.Read(Path.Combine(job.ModelDir, job.Folder + ".glb"), Bdsp.KeepPrimitive, Bdsp.Unit);
                 model = g.Model;
                 r["gltf"] = g.Report;
                 bdspClips = g.Clips;
@@ -42,6 +42,7 @@ namespace Eggy.Conv
                 var baked = GfMaterials.Bake(gm, readModel, r, bottomOrigin: true, debugDir);
                 textures = baked.Textures;
                 mapping = m => baked.Mappings.TryGetValue(m.Name, out var mm) ? mm : MaterialMapping.Default(m);
+                foreach (var m in model.Materials) if (baked.Masks.Contains(m.Name)) m.AlphaType = "Mask";
                 foreach (var mesh in model.Meshes)
                     for (int t = 0; t < mesh.TexCoords.Count; t++)
                         if (mesh.TexCoords[t] != null)
@@ -76,6 +77,8 @@ namespace Eggy.Conv
                 textures = baked.Textures;
                 int glows = Looks.RebakeGlows(model, textures, readModel);
                 if (glows > 0) r["glowsRebaked"] = glows;
+                int layered = Looks.RebakeLayeredZa(model, textures, readModel);
+                if (layered > 0) r["layersRebaked"] = layered;
                 mapping = m => Looks.Trinity(job, m, baked.Mappings[m.Name]);
             }
 
@@ -206,6 +209,7 @@ namespace Eggy.Conv
                 if (job.Variant != null) MaterialTable.Apply(sm, Require(readModel, job.Folder + ".trmmt"), job.Variant);
                 var baked = SvMaterialBaker.Bake(sm, readModel);
                 Looks.RebakeGlows(sm, baked.Textures, readModel);
+                Looks.RebakeLayeredZa(sm, baked.Textures, readModel);
                 shiny = new Shiny.Look { Materials = sm.Materials, Textures = baked.Textures, Mapping = m => Looks.Trinity(job, m, baked.Mappings[m.Name]) };
             }
             var used = model.Meshes.SelectMany(m => m.SubMeshes).Select(s => s.Material).Where(n => n != null);
@@ -215,9 +219,7 @@ namespace Eggy.Conv
         static byte[] Require(Func<string, byte[]> read, string name) => read(name) ?? throw new FileNotFoundException("missing " + name);
 
         // SwSh/LGPE models are authored in centimetres; Trinity models in metres.
-        static double Units(Job job) => job.IsGf ? GfModelReader.UnitsToMetres : job.Src == "bdsp" ? BdspUnits : 1.0;
-        // FBX2glTF's metres from BDSP's Unity scene; checked against the Pokédex heights (Ledyba 1.0 m).
-        const double BdspUnits = 1.0;
+        static double Units(Job job) => job.IsGf ? GfModelReader.UnitsToMetres : 1.0;
 
         static JsonObject Box(Vector3 min, Vector3 max) => new JsonObject
         {
@@ -260,8 +262,8 @@ namespace Eggy.Conv
         {
             var mats = Bdsp.Materials(dir, report);
             var names = model.Meshes.SelectMany(m => m.SubMeshes).Select(x => x.Material).Distinct().ToList();
-            model.Materials.Clear();
-            model.Materials.AddRange(names.Select(n => new MaterialData { Name = n, Shader = Bdsp.Shader }));
+            // Made once (the shiny pass reuses the base model's, with what the base pass set on them).
+            if (model.Materials.Count == 0) model.Materials.AddRange(names.Select(n => new MaterialData { Name = n, Shader = Bdsp.Shader }));
             var missing = names.Where(n => !mats.ContainsKey(n)).ToList();
             if (missing.Count > 0) report["bdspMaterialsMissing"] = new JsonArray(missing.Select(n => (JsonNode)n).ToArray());
             return new GfModel { Model = model, Materials = names.Select(n => mats.TryGetValue(n, out var x) ? x : new GfMaterial { Name = n }).ToList() };

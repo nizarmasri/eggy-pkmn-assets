@@ -81,6 +81,73 @@ namespace Eggy.Conv
             return n;
         }
 
+        // Legends Z-A (IkCharacter) layers, baked again one over the other. PME mixes the layers by their share of
+        // the mask (right for Scarlet/Violet, whose masks split a texel between layers); Z-A's masks overlap, a
+        // later layer painted over an earlier one (Lucario's black face mask and cream chest lie over its blue
+        // layer, which covers the whole body), so shared they came out dark blue and pale blue. Here each layer
+        // is laid over what is under it by its own mask, in order: base x colour, mixed in linear light.
+        public static int RebakeLayeredZa(ModelData model, Dictionary<string, byte[]> textures, Func<string, byte[]> read)
+        {
+            int n = 0;
+            foreach (var m in model.Materials)
+            {
+                // Eyes (a highlight layer of their own) keep PME's bake; their layers do not overlap.
+                if (m.Shader != "IkCharacter" || !m.Textures.TryGetValue("LayerMaskMap", out var maskFile) || m.Textures.ContainsKey("HighlightMaskMap")) continue;
+                string name = m.Name + "_color.png";
+                if (!textures.ContainsKey(name)) continue;
+                var layers = new Vector3?[4];
+                var scales = new float[4];
+                for (int i = 0; i < 4; i++)
+                {
+                    if (m.Colors.TryGetValue("BaseColorLayer" + (i + 1), out var c)) layers[i] = new Vector3(c.X, c.Y, c.Z);
+                    scales[i] = m.Floats.TryGetValue("LayerMaskScale" + (i + 1), out var s) ? s : 1f;
+                }
+                if (layers.All(l => l == null)) continue;
+                Bntx.Texture View(string slot, string file)
+                {
+                    var bytes = file == null ? null : read(file);
+                    if (bytes == null) return null;
+                    var t = Bntx.Read(bytes, false);
+                    var (sx, sy) = Unfold(m);
+                    return sx == 1 && sy == 1 ? t : PokeModelExporter.Scarlet.SvMaterialBaker.Unfold(t, sx, sy, m.Wraps.TryGetValue(slot, out var w) ? w : (0u, 0u));
+                }
+                var mask = View("LayerMaskMap", maskFile);
+                if (mask == null) continue;
+                var baseTex = View("BaseColorMap", m.Textures.TryGetValue("BaseColorMap", out var bf) ? bf : null);
+                int W = mask.Width, H = mask.Height;
+                var rgba = new byte[W * H * 4];
+                for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++)
+                {
+                    int p = (y * W + x) * 4;
+                    var b = Sample(baseTex, (x + 0.5f) / W, (y + 0.5f) / H);
+                    var lin = new Vector3(Lin(b.X), Lin(b.Y), Lin(b.Z));
+                    var c = lin;
+                    for (int i = 0; i < 4; i++)
+                    {
+                        if (layers[i] is not Vector3 l) continue;
+                        float k = Math.Min(1f, mask.Rgba[p + i] / 255f * scales[i]);
+                        if (k > 0) c = Vector3.Lerp(c, lin * l, k);
+                    }
+                    rgba[p] = Byte(Srgb(c.X)); rgba[p + 1] = Byte(Srgb(c.Y)); rgba[p + 2] = Byte(Srgb(c.Z)); rgba[p + 3] = Byte(b.W);
+                }
+                textures[name] = Png.Encode(rgba, W, H);
+                n++;
+            }
+            return n;
+        }
+
+        // The whole-number UV scale a Z-A body samples its textures at (as PME's SvMaterialBaker unfolds them).
+        static (int, int) Unfold(MaterialData m)
+        {
+            if (!m.Colors.TryGetValue("UVScaleOffset", out var s) || Math.Abs(s.Z) > 1e-4f || Math.Abs(s.W) > 1e-4f) return (1, 1);
+            static int Whole(float v) => v >= 1 && v <= 4 && Math.Abs(v - Math.Round(v)) < 1e-4f ? (int)Math.Round(v) : 1;
+            return (Whole(s.X), Whole(s.Y));
+        }
+
+        static float Lin(float c) => c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);
+        static float Srgb(float c) { c = Math.Clamp(c, 0, 1); return c <= 0.0031308f ? c * 12.92f : 1.055f * MathF.Pow(c, 1 / 2.4f) - 0.055f; }
+
         static float Roll(float v) => v <= 0.5f ? Math.Max(0, v) : 1f - 0.5f * MathF.Exp(-(v - 0.5f) / 0.5f);
         static byte Byte(float v) => (byte)Math.Clamp((int)Math.Round(v * 255), 0, 255);
         static Vector4 Sample(Bntx.Texture t, float u, float v)
