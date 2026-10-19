@@ -18,6 +18,7 @@ import sharp from 'sharp';
 
 const [rawDir, outDir, reviewDir = path.join(outDir, '..', 'review')] = process.argv.slice(2);
 const CLIPS = ['idle', 'appear', 'cry', 'physical', 'special', 'hit', 'faint', 'blink'];
+const MAX_GLB = 3 * 1024 * 1024;
 
 await MeshoptEncoder.ready;
 await MeshoptDecoder.ready;
@@ -73,39 +74,45 @@ for (const file of reports) {
     report[name] = r;
     continue;
   }
-  const doc = await io.read(path.join(rawDir, `${name}.glb`));
-  const root = doc.getRoot();
+  // Textures at 1024 px at most, and smaller still when that leaves the GLB over the 3 MB budget.
+  let doc, root, glb;
+  for (const size of [1024, 768, 512, 384]) {
+    doc = await io.read(path.join(rawDir, `${name}.glb`));
+    root = doc.getRoot();
 
-  // The converter's root node holds the skeleton and the meshes: normalising it moves everything.
-  const scene = root.getDefaultScene() ?? root.listScenes()[0];
-  const [top, ...others] = scene.listChildren();
-  if (!top || others.length) throw new Error(`${name}: expected one root node`);
-  const s = r.normalize.scale;
-  top.setName(r.id).setScale([s, s, s]).setTranslation(r.normalize.translation);
+    // The converter's root node holds the skeleton and the meshes: normalising it moves everything.
+    const scene = root.getDefaultScene() ?? root.listScenes()[0];
+    const [top, ...others] = scene.listChildren();
+    if (!top || others.length) throw new Error(`${name}: expected one root node`);
+    const s = r.normalize.scale;
+    top.setName(r.id).setScale([s, s, s]).setTranslation(r.normalize.translation);
 
-  materials(root);
-  root.listExtensionsUsed().find((e) => e.extensionName === 'KHR_node_visibility')?.dispose();
-  for (const mesh of root.listMeshes())
-    for (const prim of mesh.listPrimitives())
-      for (const sem of prim.listSemantics()) if (sem.startsWith('_')) prim.setAttribute(sem, null);
-  for (const list of [root.listAnimations(), root.listNodes(), root.listTextures(), root.listMeshes()])
-    for (const item of list) item.setExtras({});
-  const animNames = root.listAnimations().map((a) => a.getName());
-  if (animNames.some((n) => !CLIPS.includes(n))) throw new Error(`${name}: unexpected clips ${animNames}`);
+    materials(root);
+    root.listExtensionsUsed().find((e) => e.extensionName === 'KHR_node_visibility')?.dispose();
+    for (const mesh of root.listMeshes())
+      for (const prim of mesh.listPrimitives())
+        for (const sem of prim.listSemantics()) if (sem.startsWith('_')) prim.setAttribute(sem, null);
+    for (const list of [root.listAnimations(), root.listNodes(), root.listTextures(), root.listMeshes()])
+      for (const item of list) item.setExtras({});
+    const animNames = root.listAnimations().map((a) => a.getName());
+    if (animNames.some((n) => !CLIPS.includes(n))) throw new Error(`${name}: unexpected clips ${animNames}`);
 
-  await doc.transform(
-    resample({ tolerance: 1e-4 }),
-    prune({ keepLeaves: false }),
-    // Materials keep their names (a shiny companion swaps them in by name), even where two look the same.
-    dedup({ keepUniqueNames: true }),
-    textureCompress({ encoder: sharp, targetFormat: 'webp', resize: [1024, 1024], quality: 88, effort: 90 }),
-    reorder({ encoder: MeshoptEncoder }),
-    quantize(),
-  );
-  doc.createExtension(EXTMeshoptCompression).setRequired(true).setEncoderOptions({
-    method: EXTMeshoptCompression.EncoderMethod.QUANTIZE,
-  });
-  const glb = Buffer.from(await io.writeBinary(doc));
+    await doc.transform(
+      resample({ tolerance: 1e-4 }),
+      prune({ keepLeaves: false }),
+      // Materials keep their names (a shiny companion swaps them in by name), even where two look the same.
+      dedup({ keepUniqueNames: true }),
+      textureCompress({ encoder: sharp, targetFormat: 'webp', resize: [size, size], quality: 88, effort: 90 }),
+      reorder({ encoder: MeshoptEncoder }),
+      quantize(),
+    );
+    doc.createExtension(EXTMeshoptCompression).setRequired(true).setEncoderOptions({
+      method: EXTMeshoptCompression.EncoderMethod.QUANTIZE,
+    });
+    glb = Buffer.from(await io.writeBinary(doc));
+    if (glb.length <= MAX_GLB) break;
+    console.log(`${name}: ${(glb.length / 1e6).toFixed(2)} MB with ${size} px textures, over the budget; smaller`);
+  }
   fs.writeFileSync(path.join(review ? reviewDir : outDir, `${name}.glb`), glb);
   if (review) continue;
 

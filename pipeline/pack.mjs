@@ -8,7 +8,7 @@
 // and checks the budgets: every GLB at most 3 MB.
 //
 //   node pipeline/pack.mjs --models <dir>... --arenas <dir> --plan <plan.json> --work <dir> --rel <dir>
-//                          [--repo nizarmasri/eggy-pkmn-assets]
+//                          [--dex <Showdown pokedex.json>] [--repo nizarmasri/eggy-pkmn-assets]
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -70,6 +70,21 @@ for (const dir of modelDirs) {
   }
 }
 const ids = Object.keys(models).sort();
+
+// Heights against the Pokédex (Showdown's pokedex.json, --dex): a model whose height is off by more than
+// half or double is listed (a wrong unit or a folder that is another species).
+const dexPath = one('dex');
+const heights = [];
+if (dexPath && fs.existsSync(dexPath)) {
+  const dex = JSON.parse(fs.readFileSync(dexPath, 'utf8'));
+  for (const id of ids) {
+    const want = dex[id.replace(/-/g, '')]?.heightm;
+    const got = models[id].height;
+    if (!want || !got) continue;
+    const ratio = got / want;
+    if (ratio < 0.5 || ratio > 2) heights.push({ id, height: got, pokedex: want, ratio: Math.round(ratio * 100) / 100 });
+  }
+}
 fs.writeFileSync(path.join(root, 'models.json'), JSON.stringify({ v: 1, models: Object.fromEntries(ids.map((id) => [id, models[id]])) }, null, 1) + '\n');
 
 // Coverage: every planned id is here, or the plan or the conversion says why not.
@@ -143,6 +158,7 @@ const summary = {
   shinyBytes: ids.reduce((n, id) => n + (models[id].shiny?.bytes ?? 0), 0),
   bySrc: ids.reduce((o, id) => ({ ...o, [models[id].src]: (o[models[id].src] ?? 0) + 1 }), {}),
   missing,
+  heights,
   problems,
 };
 fs.writeFileSync(path.join(main, 'report.json'), JSON.stringify({ summary, models: report }, null, 1) + '\n');
@@ -160,6 +176,7 @@ const mb = (n) => (n / 1e6).toFixed(1);
 console.log(`${pack}: ${mb(bytes)} MB in ${parts.length} parts; ${ids.length} models (${mb(summary.modelBytes)} MB), ${summary.shinies} shinies (${mb(summary.shinyBytes)} MB), ${summary.arenas} arenas`);
 console.log(`by source: ${JSON.stringify(summary.bySrc)}`);
 for (const m of missing) console.log(`  missing ${m.id}: ${m.why}`);
+for (const h of heights) console.log(`  height ${h.id}: ${h.height} m, the Pokédex says ${h.pokedex} m`);
 for (const p of problems) console.log(`::error::${p}`);
 if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `pack=${pack}\n`);
 if (process.env.GITHUB_STEP_SUMMARY)

@@ -1,0 +1,455 @@
+name: Build the m1 pack
+
+# The production 3D pack for PokéBattle: every model id the game can show (pipeline/ids.mjs), each from
+# the best game that has it (pipeline/plan.mjs), the Brilliant Diamond / Shining Pearl-only species through
+# the Unity path, and the Let's Go arenas. Published as release m1-<hash> (the tarball in 10 MiB parts, the
+# lock eggy's Dockerfile reads, every file on its own), m1-<hash>-shiny (the shiny companions, which do not
+# fit under a release's 1000 assets) and the m1-<hash>-review pre-release (contact sheets and close-ups).
+#
+# Every job that runs third-party code (MEGA, 7z, PokeModelExporter, AssetStudio, FBX2glTF, Chrome) can only
+# read the repo. Only the publish job can write, and it runs nothing but gh on the artifacts; the cache tidy
+# job deletes old caches with gh and nothing else.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the releases
+        type: boolean
+        default: true
+      only:
+        description: Only these ids (regex; a smoke run, not for publishing)
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m1
+  cancel-in-progress: false
+
+env:
+  PME_REPO: https://github.com/GoldenCarrotMLP/PokeModelExporter.git
+  PME_SHA: 84ec1e58c0fbb9a0dc7a2bf36b618e853ae2328a
+  MEGA_CACHE: ${{ github.workspace }}/cache
+  ASM_URL: https://github.com/aelurum/AssetStudio/releases/download/v0.19.0/AssetStudioModCLI_net9_linux64.zip
+  ASM_REPO: https://github.com/aelurum/AssetStudio.git
+  ASM_SHA: 6de33d04379828abfcd35e0965b23d03b88f4751
+  FBX2GLTF_URL: https://github.com/godotengine/FBX2glTF/releases/download/v0.13.1/FBX2glTF-linux-x86_64.zip
+  SHARDS: 16
+  # Full review sheets (every clip, the variant rows) for these; every other model gets its strip on the
+  # contact sheets. Each of the fixes has one here: SV eyes (pikachu, garchomp, gengar), Lucario, a Sword/
+  # Shield normal map (nidoking), Charizard's flame, shinies, the forms, and the BDSP-only species.
+  CLOSEUPS: '^(pikachu|charizard|lucario|garchomp|gengar|nidoking|kingler|rattata|ponyta|absol|arceus|arceus-fire|deoxys|deoxys-attack|unown-b|rotom-wash|castform|castform-sunny|cherrim-sunshine|giratina-origin|shaymin-sky|wormadam-sandy|shellos-east|ledyba|ledian|taillow|swellow|skitty|delcatty|spinda|clamperl|huntail|gorebyss)$'
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      bdsp: ${{ steps.plan.outputs.bdsp }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/cd
+          key: mega-cd-${{ github.run_id }}
+          restore-keys: mega-cd-
+      - name: Every id, and where each comes from
+        id: plan
+        run: |
+          rm -f cache/.dirty
+          node pipeline/ids.mjs species/p1-ids.json work/ids.json
+          node pipeline/plan.mjs work/ids.json work/plan.json --shards "$SHARDS" ${{ inputs.only != '' && format('--only ''{0}''', inputs.only) || '' }}
+      - uses: actions/cache/save@v4
+        if: hashFiles('cache/.dirty') != ''
+        with:
+          path: cache/cd
+          key: mega-cd-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan
+          path: work/plan.json
+
+  models:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: PokeModelExporter at a pinned commit, and the converter
+        run: |
+          git init -q vendor/pme
+          git -C vendor/pme fetch -q --depth 1 "$PME_REPO" "$PME_SHA"
+          git -C vendor/pme checkout -q FETCH_HEAD
+          dotnet build conv/EggyConv.csproj -c Release -o work/conv --nologo -clp:ErrorsOnly
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan
+          path: work
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/cd
+          key: mega-cd-${{ github.run_id }}
+          restore-keys: mega-cd-
+      # One cache per shard: its models' zip entries (about 80 MB), so a rerun reads nothing from MEGA.
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/entries
+          key: mega-s${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: mega-s${{ matrix.shard }}-
+      - name: Fetch, convert, optimise
+        run: |
+          rm -f cache/.dirty
+          node pipeline/fetch-entries.mjs work/plan.json work --shard ${{ matrix.shard }}
+          dotnet work/conv/eggyconv.dll work/jobs.json work/raw
+          # A model that fails is left out and reported (the pack lists it as missing, with why).
+          node pipeline/optimize.mjs work/raw out work/review || echo "::warning::some models failed in shard ${{ matrix.shard }}"
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('cache/.dirty') != ''
+        with:
+          path: cache/entries
+          key: mega-s${{ matrix.shard }}-${{ github.run_id }}
+      - name: Review strips and close-ups
+        if: always() && hashFiles('out/models.json') != ''
+        run: |
+          RENDER_CLOSEUPS="$CLOSEUPS" node pipeline/render.mjs out work/review review work/raw || true
+          mv review/checks.json review/checks-s${{ matrix.shard }}.json || true
+          for f in work/raw/*.json; do cp "$f" "review/report-$(basename "$f")"; done
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('out/models.json') != ''
+        with:
+          name: models-s${{ matrix.shard }}
+          path: out/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-s${{ matrix.shard }}
+          path: review/
+
+  bdsp:
+    needs: plan
+    if: needs.plan.outputs.bdsp == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+      - name: PokeModelExporter at a pinned commit, and the converter
+        run: |
+          git init -q vendor/pme
+          git -C vendor/pme fetch -q --depth 1 "$PME_REPO" "$PME_SHA"
+          git -C vendor/pme checkout -q FETCH_HEAD
+          dotnet build conv/EggyConv.csproj -c Release -o work/conv --nologo -clp:ErrorsOnly
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan
+          path: work
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/bdsp
+          key: bdsp-src-${{ github.run_id }}
+          restore-keys: bdsp-src-
+      - name: Fetch BDSP-Poke.7z from MEGA
+        id: get
+        run: |
+          rm -f cache/bdsp/.dirty
+          node pipeline/arenas/get.mjs BDSP-Poke.7z cache/bdsp
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('cache/bdsp/.dirty') != ''
+        with:
+          path: cache/bdsp
+          key: bdsp-src-${{ github.run_id }}
+      - name: AssetStudio (built from its tag with clips in animator mode) and FBX2glTF
+        run: |
+          mkdir -p tools
+          curl -fsSL "$ASM_URL" -o tools/asm.zip && unzip -q tools/asm.zip -d tools/asm
+          curl -fsSL "$FBX2GLTF_URL" -o tools/fbx.zip && unzip -q tools/fbx.zip -d tools/fbx
+          git init -q tools/asm-src
+          git -C tools/asm-src fetch -q --depth 1 "$ASM_REPO" "$ASM_SHA"
+          git -C tools/asm-src checkout -q FETCH_HEAD
+          o=tools/asm-src/AssetStudioCLI/Options/CLIOptions.cs
+          perl -0pi -e 's/(ClassIDType\.Animator,\s*ClassIDType\.Mesh,\s*ClassIDType\.Texture2D,)/$1\n                            ClassIDType.AnimationClip,/' "$o"
+          grep -q 'ClassIDType.Texture2D,\s*$' "$o"
+          dotnet build tools/asm-src/AssetStudioCLI/AssetStudioCLI.csproj -c Release -f net9.0 -r linux-x64 --self-contained false -o tools/asm-build --nologo -clp:ErrorsOnly
+          find tools/asm -name '*.so' -exec cp -n {} tools/asm-build/ \;
+      - name: The Unity path, then the converter
+        run: |
+          fbx=$(find tools/fbx -type f -name 'FBX2glTF-*' -not -name '*.txt' | head -1)
+          chmod +x "$fbx" tools/asm-build/AssetStudioModCLI
+          pipeline/bdsp/extract.sh "${{ steps.get.outputs.file }}" work/bdsp work/out tools/asm-build/AssetStudioModCLI "$fbx" $(node pipeline/bdsp/jobs.mjs work/plan.json --folders)
+          node pipeline/bdsp/jobs.mjs work/plan.json work/out work/jobs.json
+          dotnet work/conv/eggyconv.dll work/jobs.json work/raw
+          node pipeline/optimize.mjs work/raw out work/review || echo "::warning::some BDSP models failed"
+      - name: Review strips and close-ups
+        if: always() && hashFiles('out/models.json') != ''
+        run: |
+          RENDER_CLOSEUPS="$CLOSEUPS" node pipeline/render.mjs out work/review review work/raw || true
+          mv review/checks.json review/checks-bdsp.json || true
+          for f in work/raw/*.json; do cp "$f" "review/report-$(basename "$f")"; done
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('out/models.json') != ''
+        with:
+          name: models-bdsp
+          path: out/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-bdsp
+          path: review/
+
+  arenas:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: PokeModelExporter at a pinned commit, and the converter
+        run: |
+          git init -q vendor/pme
+          git -C vendor/pme fetch -q --depth 1 "$PME_REPO" "$PME_SHA"
+          git -C vendor/pme checkout -q FETCH_HEAD
+          dotnet build conv/EggyConv.csproj -c Release -o work/conv --nologo -clp:ErrorsOnly
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/arenas
+          key: arenas-src-${{ github.run_id }}
+          restore-keys: arenas-src-
+      - name: Fetch LGPE-BattleMaps.7z from MEGA
+        id: get
+        run: |
+          rm -f cache/arenas/.dirty
+          node pipeline/arenas/get.mjs LGPE-BattleMaps.7z cache/arenas
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('cache/arenas/.dirty') != ''
+        with:
+          path: cache/arenas
+          key: arenas-src-${{ github.run_id }}
+      - name: Check, extract, convert, optimise
+        run: |
+          7z t "${{ steps.get.outputs.file }}" | tail -2
+          7z x -y -bd -owork/src "${{ steps.get.outputs.file }}" > /dev/null
+          dotnet work/conv/eggyconv.dll --arenas work/src/background work/raw pipeline/arenas/b0.json
+          node pipeline/arenas/optimize.mjs work/raw arenas pipeline/arenas/b0.json
+          mkdir -p review
+          for f in work/raw/*.json; do cp "$f" "review/arena-report-$(basename "$f")"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arenas
+          path: arenas/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-arenas-reports
+          path: review/
+
+  # The arenas drawn from the battle camera with two of the pack's own models standing on the spots.
+  arena-review:
+    needs: [models, arenas]
+    if: always() && needs.arenas.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/download-artifact@v4
+        with:
+          name: arenas
+          path: arenas
+      # Pikachu (dex 25) and Snorlax (dex 143) for scale: their shards are dex % SHARDS.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: models-s9
+          path: work/s9
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: models-s15
+          path: work/s15
+      - name: Draw
+        run: |
+          mkdir -p work/pkmn review
+          cp work/s9/pikachu.glb work/s15/snorlax.glb work/pkmn/ 2>/dev/null || true
+          node -e '
+            const fs = require("fs"), m = {};
+            for (const [dir, id] of [["work/s9", "pikachu"], ["work/s15", "snorlax"]]) {
+              try { const x = JSON.parse(fs.readFileSync(dir + "/models.json", "utf8")).models[id]; if (x) m[id] = x; } catch {}
+            }
+            fs.writeFileSync("work/pkmn/models.json", JSON.stringify({ v: 1, models: m }));
+          '
+          node pipeline/arenas/render.mjs arenas work/renders work/pkmn || true
+          for f in work/renders/*.jpg; do cp "$f" "review/arena-$(basename "$f")"; done
+          cp work/renders/checks.json review/arena-checks.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: review-arenas
+          path: review/
+
+  pack:
+    needs: [plan, models, bdsp, arenas, arena-review]
+    if: always() && needs.plan.result == 'success' && needs.arenas.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      pack: ${{ steps.pack.outputs.pack }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan
+          path: work
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: models-*
+          path: work/models
+      - uses: actions/download-artifact@v4
+        with:
+          name: arenas
+          path: work/arenas
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: review-*
+          path: work/review
+          merge-multiple: true
+      - name: The pack, its parts, its lock, the release layout
+        id: pack
+        run: |
+          curl -fsSL https://play.pokemonshowdown.com/data/pokedex.json -o work/pokedex.json || true
+          node pipeline/pack.mjs --models work/models/* --arenas work/arenas --plan work/plan.json --work work/pack --rel rel --dex work/pokedex.json
+      - name: Contact sheets and the review set
+        run: |
+          mkdir -p rel/review
+          node pipeline/contact.mjs rel/main/models.json work/review rel/review
+          find work/review -maxdepth 1 -name '*.jpg' -not -name 'strip-*' -exec cp {} rel/review/ \;
+          cp work/review/arena-checks.json rel/review/ 2>/dev/null || true
+          (cd work/review && tar -czf ../../rel/review/reports.tar.gz report-*.json arena-report-*.json checks-*.json 2>/dev/null || true)
+          cp work/pack/summary.json rel/review/
+          (cd rel/review && sha256sum $(ls | grep -v SHA256SUMS) > SHA256SUMS)
+          ls rel/review | wc -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-main
+          path: rel/main/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-shiny
+          path: rel/shiny/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-review
+          path: rel/review/
+
+  publish:
+    needs: pack
+    if: inputs.publish && inputs.only == '' && needs.pack.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: rel
+      - name: Publish m1-<hash>, its shinies and its review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PACK: ${{ needs.pack.outputs.pack }}
+        run: |
+          set -euo pipefail
+          case "$PACK" in m1-????????) ;; *) echo "not a pack id: $PACK"; exit 1 ;; esac
+          notes() {
+            echo "Built by run ${{ github.run_id }} from commit ${{ github.sha }}. $1"
+            echo
+            echo 'Fetch with `node fetch.mjs --tag '"$2"' --out <dir>` (segmented, resumable, checked against SHA256SUMS).'
+          }
+          make() {
+            local tag=$1 dir=$2 pre=$3 text=$4
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              notes "$text" "$tag" > notes.md
+              gh release create "$tag" $pre --title "$tag" --notes-file notes.md
+            fi
+            # Uploads in groups, so one call never carries hundreds of files.
+            ls "$dir" | split -l 50 - batch.
+            for b in batch.*; do (cd "$dir" && gh release upload "$tag" $(cat "../../$b") --clobber); done
+            rm -f batch.*
+          }
+          make "$PACK" rel/release-main "" "The tarball in 10 MiB parts (pkmn-$PACK.tar.NN), models.lock.json for eggy, and every file of the pack on its own (arena GLBs as arena-<id>.glb)."
+          make "$PACK-shiny" rel/release-shiny "" "The shiny companions of $PACK (<id>.shiny.glb), also inside its tarball."
+          make "$PACK-review" rel/release-review "--prerelease" "Review sheets for $PACK: contact sheets of every model, close-ups of each fix, every arena from the battle camera."
+          gh release view "$PACK" --json assets --jq '.assets | length'
+
+  tidy-caches:
+    needs: [models, bdsp, arenas]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Keep only the newest cache of each kind
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh cache list --limit 200 --json id,key,createdAt --jq 'sort_by(.createdAt) | reverse | .[] | "\(.id) \(.key)"' > caches.txt
+          declare -A seen
+          while read -r id key; do
+            kind=${key%-*}
+            if [ -n "${seen[$kind]:-}" ]; then gh cache delete "$id" || true; else seen[$kind]=1; fi
+          done < caches.txt
