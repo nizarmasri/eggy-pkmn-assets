@@ -29,7 +29,11 @@ namespace Eggy.Conv
             return map;
         }
 
-        static bool IsGlow(MaterialData m) => m.Shader == "Unlit" && (Hdr(m) || GlowName.IsMatch(m.Name));
+        // Also a gas drawn with NonDirectional (Gastly's smoke): a sphere around the body that the game renders as a
+        // haze; drawn as a surface it hid Gastly's face. Added on as a glow, the face shows through it.
+        static bool IsGlow(MaterialData m) => (m.Shader == "Unlit" && (Hdr(m) || GlowName.IsMatch(m.Name)))
+            || (m.Shader == "NonDirectional" && SmokeName.IsMatch(m.Name));
+        static readonly System.Text.RegularExpressions.Regex SmokeName = new(@"smoke|gas", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
         // A glow's colour, baked again for additive drawing. PME's bake spills a layer's over-bright excess into
         // the other channels (bloom), which turns Charizard's 5.0 red tip and 4.0 orange base into salmon and
@@ -86,20 +90,30 @@ namespace Eggy.Conv
         // later layer painted over an earlier one (Lucario's black face mask and cream chest lie over its blue
         // layer, which covers the whole body), so shared they came out dark blue and pale blue. Here each layer
         // is laid over what is under it by its own mask, in order: base x colour, mixed in linear light.
-        public static int RebakeLayeredZa(ModelData model, Dictionary<string, byte[]> textures, Func<string, byte[]> read)
+        public static int RebakeLayeredZa(ModelData model, Dictionary<string, byte[]> textures, Func<string, byte[]> read) =>
+            RebakeLayered(model, textures, read, m => m.Shader == "IkCharacter", gain: 1, shareMix: false);
+
+        // Legends: Arceus's layer colours are linear and half scale: twice the colour, mixed with the base in
+        // linear space, is the game's (Pikachu's 0.48, 0.346, 0.01 is its yellow, 0.98, 0.86, 0.15 in sRGB;
+        // Togetic's 0.39 grey is white). PME's bake used them as they are, which left Togetic grey, Ponyta
+        // olive, Silcoon black and the Spheal line navy and olive. Mixed by their share of the mask, as PME does.
+        public static int RebakeLayeredLa(ModelData model, Dictionary<string, byte[]> textures, Func<string, byte[]> read) =>
+            RebakeLayered(model, textures, read, m => m.Shader != "Unlit" && !IsGlow(m), gain: 2, shareMix: true);
+
+        static int RebakeLayered(ModelData model, Dictionary<string, byte[]> textures, Func<string, byte[]> read, Func<MaterialData, bool> applies, float gain, bool shareMix)
         {
             int n = 0;
             foreach (var m in model.Materials)
             {
                 // Eyes (a highlight layer of their own) keep PME's bake; their layers do not overlap.
-                if (m.Shader != "IkCharacter" || !m.Textures.TryGetValue("LayerMaskMap", out var maskFile) || m.Textures.ContainsKey("HighlightMaskMap")) continue;
+                if (!applies(m) || !m.Textures.TryGetValue("LayerMaskMap", out var maskFile) || m.Textures.ContainsKey("HighlightMaskMap")) continue;
                 string name = m.Name + "_color.png";
                 if (!textures.ContainsKey(name)) continue;
                 var layers = new Vector3?[4];
                 var scales = new float[4];
                 for (int i = 0; i < 4; i++)
                 {
-                    if (m.Colors.TryGetValue("BaseColorLayer" + (i + 1), out var c)) layers[i] = new Vector3(c.X, c.Y, c.Z);
+                    if (m.Colors.TryGetValue("BaseColorLayer" + (i + 1), out var c)) layers[i] = new Vector3(c.X, c.Y, c.Z) * gain;
                     scales[i] = m.Floats.TryGetValue("LayerMaskScale" + (i + 1), out var s) ? s : 1f;
                 }
                 if (layers.All(l => l == null)) continue;
@@ -123,12 +137,25 @@ namespace Eggy.Conv
                     var b = Sample(baseTex, (x + 0.5f) / W, (y + 0.5f) / H);
                     var lin = new Vector3(Lin(b.X), Lin(b.Y), Lin(b.Z));
                     var c = lin;
-                    for (int i = 0; i < 4; i++)
+                    if (shareMix)
                     {
-                        if (layers[i] is not Vector3 l) continue;
-                        float k = Math.Min(1f, mask.Rgba[p + i] / 255f * scales[i]);
-                        if (k > 0) c = Vector3.Lerp(c, lin * l, k);
+                        var mix = Vector3.Zero;
+                        float total = 0;
+                        for (int i = 0; i < 4; i++)
+                        {
+                            if (layers[i] is not Vector3 l) continue;
+                            float k = Math.Min(1f, mask.Rgba[p + i] / 255f * scales[i]);
+                            if (k > 0) { mix += l * k; total += k; }
+                        }
+                        if (total > 0) c = Vector3.Lerp(lin, lin * (mix / total), Math.Min(1f, total));
                     }
+                    else
+                        for (int i = 0; i < 4; i++)
+                        {
+                            if (layers[i] is not Vector3 l) continue;
+                            float k = Math.Min(1f, mask.Rgba[p + i] / 255f * scales[i]);
+                            if (k > 0) c = Vector3.Lerp(c, lin * l, k);
+                        }
                     rgba[p] = Byte(Srgb(c.X)); rgba[p + 1] = Byte(Srgb(c.Y)); rgba[p + 2] = Byte(Srgb(c.Z)); rgba[p + 3] = Byte(b.W);
                 }
                 textures[name] = Png.Encode(rgba, W, H);

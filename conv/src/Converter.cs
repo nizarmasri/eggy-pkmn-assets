@@ -77,7 +77,7 @@ namespace Eggy.Conv
                 textures = baked.Textures;
                 int glows = Looks.RebakeGlows(model, textures, readModel);
                 if (glows > 0) r["glowsRebaked"] = glows;
-                int layered = Looks.RebakeLayeredZa(model, textures, readModel);
+                int layered = job.Src == "la" ? Looks.RebakeLayeredLa(model, textures, readModel) : Looks.RebakeLayeredZa(model, textures, readModel);
                 if (layered > 0) r["layersRebaked"] = layered;
                 mapping = m => Looks.Trinity(job, m, baked.Mappings[m.Name]);
             }
@@ -209,7 +209,7 @@ namespace Eggy.Conv
                 if (job.Variant != null) MaterialTable.Apply(sm, Require(readModel, job.Folder + ".trmmt"), job.Variant);
                 var baked = SvMaterialBaker.Bake(sm, readModel);
                 Looks.RebakeGlows(sm, baked.Textures, readModel);
-                Looks.RebakeLayeredZa(sm, baked.Textures, readModel);
+                if (job.Src == "la") Looks.RebakeLayeredLa(sm, baked.Textures, readModel); else Looks.RebakeLayeredZa(sm, baked.Textures, readModel);
                 shiny = new Shiny.Look { Materials = sm.Materials, Textures = baked.Textures, Mapping = m => Looks.Trinity(job, m, baked.Mappings[m.Name]) };
             }
             var used = model.Meshes.SelectMany(m => m.SubMeshes).Select(s => s.Material).Where(n => n != null);
