@@ -210,13 +210,14 @@ jobs:
           ls tools/asm-build | head -40
           cli=tools/asm-build/AssetStudioModCLI
           chmod +x "$cli"
-          pipeline/bdsp/extract.sh "$a" work/bdsp work/out "$cli" "$fbx" ${{ inputs.bdsp }}
+          DUMP_CLIPS=1 pipeline/bdsp/extract.sh "$a" work/bdsp work/out "$cli" "$fbx" ${{ inputs.bdsp }}
           for g in $(find work/out -name '*.glb'); do node pipeline/bdsp/inspect.mjs "$g"; done > diag/bdsp-glb.txt 2>&1 || true
           grep -v '^      ' diag/bdsp-glb.txt | head -200
           for d in work/out/*/; do
             n=$(basename "$d")
             (cd "$d" && ls -la . materials) > "diag/bdsp-files-$n.txt"
             for f in "$d"/*.log; do if [ -f "$f" ]; then cp "$f" "diag/bdsp-$n-$(basename "$f")"; fi; done
+            if [ -d "$d/objects" ]; then tar -czf "diag/bdsp-objects-$n.tar.gz" -C "$d" objects; fi
           done
       - name: Convert, optimise and draw what the Unity path made
         run: |

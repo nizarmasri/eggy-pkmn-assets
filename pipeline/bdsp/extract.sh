@@ -39,6 +39,12 @@ for folder in "$@"; do
   # The materials as Unity has them (which texture each one samples), dumped as text, for binding them after FBX2glTF.
   "$cli" "$src" -m dump -t material --load-all -o "$exp/materials" > "$exp.mat.log" 2>&1 || tail -5 "$exp.mat.log"
   find "$exp/materials" -type f | head -20
+  # The scene objects too (GameObject: m_IsActive; SkinnedMeshRenderer: m_Enabled), and with DUMP_CLIPS set the
+  # clips as text: which meshes a model shows at rest, and which ones its clips turn on and off.
+  types=gameobject,skinnedmeshrenderer
+  [ -n "${DUMP_CLIPS:-}" ] && types=$types,animationclip,monobehaviour
+  "$cli" "$src" -m dump -t "$types" --load-all -o "$exp/objects" > "$exp.obj.log" 2>&1 || tail -5 "$exp.obj.log"
+  find "$exp/objects" -type f | wc -l
   f=$(find "$exp" -name "$folder.fbx" | head -1)
   [ -z "$f" ] && f=$(find "$exp" -name '*.fbx' | head -1)
   if [ -z "$f" ]; then echo "$folder: no FBX"; continue; fi
@@ -47,6 +53,8 @@ for folder in "$@"; do
   cp "$(dirname "$f")"/*.png "$dest/" 2>/dev/null
   mkdir -p "$dest/materials"
   find "$exp/materials" -type f -name '*.txt' -exec cp {} "$dest/materials/" \; 2>/dev/null
+  mkdir -p "$dest/objects"
+  (cd "$exp/objects" 2>/dev/null && find . -type f -name '*.txt' | while read -r o; do cp "$o" "$dest/objects/$(echo "${o#./}" | tr '/' '~')"; done)
   cp "$exp.info.log" "$dest/info.log"; cp "$exp.log" "$dest/animator.log"
   if ! "$fbx" --binary --verbose --input "$f" --output "$dest/$folder" > "$dest/fbx2gltf.log" 2>&1; then echo "$folder: FBX2glTF failed"; tail -5 "$dest/fbx2gltf.log"; continue; fi
   grep -iE "anim|take|stack" "$dest/fbx2gltf.log" | head -12
