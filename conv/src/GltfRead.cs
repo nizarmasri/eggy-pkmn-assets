@@ -28,6 +28,8 @@ namespace Eggy.Conv
             public JsonObject Report = new();
         }
 
+        static JsonNode R3(float v) => MathF.Round(v, 3);
+
         public static Result Read(string path, Func<string, string, bool> keepPrimitive, float unit = 1)
         {
             var glb = File.ReadAllBytes(path);
@@ -125,6 +127,7 @@ namespace Eggy.Conv
             var materials = Arr(doc, "materials");
             var skins = Arr(doc, "skins");
             var dropped = new JsonArray();
+            var prims = new JsonArray();
             for (int ni = 0; ni < nn; ni++)
             {
                 var n = nodes[ni];
@@ -204,6 +207,29 @@ namespace Eggy.Conv
                     if (prim.TryGetProperty("indices", out var ii)) idx = Floats(ii.GetInt32(), out _).Select(x => (int)x + b).ToArray();
                     else idx = Enumerable.Range(b, vc).ToArray();
                     subs.Add(new SubMeshData { Material = mat, Indices = idx });
+                    // What each part is, for reading a model: its size and place at rest, and its vertex colours
+                    // (which the converter does not use).
+                    var lo = new Vector3(float.MaxValue); var hi = new Vector3(float.MinValue);
+                    for (int v = b; v < P.Count; v++) { lo = Vector3.Min(lo, P[v]); hi = Vector3.Max(hi, P[v]); }
+                    var info = new JsonObject
+                    {
+                        ["mesh"] = meshName, ["material"] = mat, ["tris"] = idx.Length / 3,
+                        ["box"] = new JsonArray(R3(lo.X), R3(lo.Y), R3(lo.Z), R3(hi.X), R3(hi.Y), R3(hi.Z)),
+                    };
+                    if (attrs.TryGetProperty("COLOR_0", out var ca))
+                    {
+                        var col = Floats(ca.GetInt32(), out int cc);
+                        double r0 = 0, g0 = 0, b0 = 0, a0 = 0; float amin = 1, amax = 0; int under = 0;
+                        for (int v = 0; v < vc; v++)
+                        {
+                            r0 += col[v * cc]; g0 += col[v * cc + 1]; b0 += col[v * cc + 2];
+                            float a = cc == 4 ? col[v * cc + 3] : 1;
+                            a0 += a; amin = Math.Min(amin, a); amax = Math.Max(amax, a); if (a < 0.5f) under++;
+                        }
+                        info["color"] = new JsonArray(R3((float)(r0 / vc)), R3((float)(g0 / vc)), R3((float)(b0 / vc)), R3((float)(a0 / vc)));
+                        info["alpha"] = $"{amin:F2}..{amax:F2}, {100.0 * under / vc:F0}% under half";
+                    }
+                    prims.Add(info);
                 }
                 if (subs.Count == 0) continue;
                 var md = new MeshData { Name = meshName, Positions = P.ToArray(), Normals = N.ToArray(), Joints = J.ToArray(), Weights = W.ToArray() };
@@ -215,6 +241,7 @@ namespace Eggy.Conv
             // The skeleton in metres too (after the meshes, which were put through it as it was).
             foreach (var nd in model.Nodes) nd.Translation *= unit;
             res.Report["dropped"] = dropped;
+            res.Report["primitives"] = prims;
             res.Report["joints"] = nextJoint;
 
             // ---- Animations, as bone tracks in frames ----
