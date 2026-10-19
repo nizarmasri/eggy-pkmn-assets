@@ -178,6 +178,7 @@
     { view: 'overview', x: 0, y: BH, w: SW, h: SH },
     { view: 'top', x: SW, y: BH, w: SW, h: SH },
   ];
+  let centreHits = [];
   for (const { view, x, y, w, h } of views) {
     marks.visible = view !== 'battle';
     camera.aspect = w / h;
@@ -199,6 +200,17 @@
       camera.near = Math.max(0.05, r * 0.02);
       camera.position.set(r * 1.1, r * 0.9, -r * 1.1);
       camera.lookAt(0, 0, 0);
+      // What the overview's centre ray meets first (the checks list it: which material hides the field).
+      camera.updateMatrixWorld();
+      camera.updateProjectionMatrix();
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(new THREE.Vector2(0, 0), camera);
+      centreHits = ray.intersectObject(arena, true).slice(0, 6).map((h) => ({
+        material: [].concat(h.object.material)[h.face?.materialIndex ?? 0]?.name ?? '',
+        role: [].concat(h.object.material)[0]?.userData?.role ?? null,
+        distance: Math.round(h.distance * 100) / 100,
+        at: h.point.toArray().map((v) => Math.round(v * 100) / 100),
+      }));
     } else {
       camera.up.set(0, 1, 0);
       camera.near = 0.05;
@@ -221,7 +233,7 @@
   }
   let tris = 0;
   arena.traverse((o) => { if (o.isMesh) tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3; });
-  window.result = { tris, roles, box: { min: box.min.toArray(), max: box.max.toArray() } };
+  window.result = { tris, roles, box: { min: box.min.toArray(), max: box.max.toArray() }, centreHits };
 </script>
 </body>
 </html>
