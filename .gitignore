@@ -1,0 +1,12 @@
+node_modules/
+out/
+work/
+cache/
+vendor/
+conv/bin/
+conv/obj/
+.DS_Store
+*.part
+*.state
+fetch.log
+/arenas/

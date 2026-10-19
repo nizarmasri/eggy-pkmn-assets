@@ -1,0 +1,145 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Arena sheet</title>
+<style>
+  html, body { margin: 0; background: #2b2f36; font: 600 15px/1.2 system-ui, sans-serif; color: #e8eaed; }
+  #sheet { position: relative; }
+  .label { position: absolute; padding: 4px 7px; background: #0009; border-radius: 4px; }
+</style>
+<script type="importmap">
+  { "imports": { "three": "/three/build/three.module.js", "three/addons/": "/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="sheet"></div>
+<script type="module">
+  // One arena the way the game's three.js will draw it: from the battle camera (behind and above the
+  // near side, looking at the far spot), an overview, and from above with the spots and the floor
+  // radius marked. Two B0 Pokémon stand on the singles spots at their real heights, for scale.
+  import * as THREE from 'three';
+  import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+  import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+  const q = new URLSearchParams(location.search);
+  const meta = JSON.parse(q.get('meta') || '{}');
+  const W = 800, H = 500;
+  const views = ['battle', 'overview', 'top'];
+  const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+  const gltf = await loader.loadAsync(q.get('model'));
+  const arena = gltf.scene;
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  renderer.setPixelRatio(1);
+  // A second row, ['as published', 'lit preview'], helped choose unlit; one row is drawn now.
+  const rows = ['as published'];
+  renderer.setSize(W * views.length, H * rows.length);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.NeutralToneMapping;
+  renderer.setScissorTest(true);
+  document.getElementById('sheet').appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x3a3f47);
+  // Lit arenas need light; unlit ones ignore it.
+  scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+  scene.environmentIntensity = 0.5;
+  const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+  sun.position.set(3, 8, 4);
+  scene.add(sun, new THREE.HemisphereLight(0xdde6ff, 0x404040, 0.5), arena);
+
+  // Spots: blue near, red far; singles as discs, doubles as rings. The floor radius as a yellow circle.
+  const v3 = (a) => new THREE.Vector3(...a);
+  const marks = new THREE.Group();
+  const disc = (p, color, r) => {
+    const m = new THREE.Mesh(new THREE.CircleGeometry(r, 32), new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.8 }));
+    m.rotation.x = -Math.PI / 2; m.position.copy(v3(p)).add(new THREE.Vector3(0, 0.02, 0)); m.renderOrder = 5;
+    marks.add(m);
+  };
+  const ring = (p, color, r) => {
+    const m = new THREE.Mesh(new THREE.RingGeometry(r * 0.75, r, 32), new THREE.MeshBasicMaterial({ color, depthTest: false, side: THREE.DoubleSide }));
+    m.rotation.x = -Math.PI / 2; m.position.copy(v3(p)).add(new THREE.Vector3(0, 0.02, 0)); m.renderOrder = 6;
+    marks.add(m);
+  };
+  const s = meta.spots ?? {};
+  if (s.singles) { disc(s.singles.near, 0x3b82f6, 0.35); disc(s.singles.far, 0xef4444, 0.35); }
+  if (s.doubles) { for (const p of s.doubles.near) ring(p, 0x93c5fd, 0.3); for (const p of s.doubles.far) ring(p, 0xfca5a5, 0.3); }
+  if (meta.radius) {
+    const c = new THREE.Mesh(new THREE.RingGeometry(meta.radius - 0.06, meta.radius, 96), new THREE.MeshBasicMaterial({ color: 0xfacc15, depthTest: false, side: THREE.DoubleSide }));
+    c.rotation.x = -Math.PI / 2; c.position.y = 0.03; c.renderOrder = 4;
+    marks.add(c);
+  }
+  scene.add(marks);
+
+  // Pokémon for scale: normalised to height 1, scaled by models.json height; near faces +Z (toward far).
+  const actors = [];
+  for (const [who, where, turn] of [[q.get('near'), 'near', 0], [q.get('far'), 'far', Math.PI]]) {
+    if (!who || !s.singles) continue;
+    const [file, height] = who.split('@');
+    const g = await loader.loadAsync(file);
+    g.scene.scale.setScalar(Number(height));
+    g.scene.position.copy(v3(s.singles[where]));
+    g.scene.rotation.y = turn;
+    const mixer = new THREE.AnimationMixer(g.scene);
+    const idle = g.animations.find((a) => a.name === 'idle');
+    if (idle) { mixer.clipAction(idle).play(); mixer.update(0); }
+    scene.add(g.scene);
+    actors.push(g.scene);
+  }
+
+  const box = new THREE.Box3().setFromObject(arena, true);
+  const size = box.getSize(new THREE.Vector3());
+  const near = v3(s.singles?.near ?? [0, 0, -3]), far = v3(s.singles?.far ?? [0, 0, 3]);
+  const D = Math.max(near.distanceTo(far), 2);
+  const sheet = document.getElementById('sheet');
+  const camera = new THREE.PerspectiveCamera(40, W / H, 0.05, 4000);
+  // Row 2: the same arena with every unlit material drawn lit (Lambert, same maps and vertex colours),
+  // to judge whether the stage reads better under the game's lights.
+  const unlitMats = new Map();
+  arena.traverse((o) => { if (o.isMesh && o.material.isMeshBasicMaterial) unlitMats.set(o, o.material); });
+  const litMats = new Map([...unlitMats].map(([o, m]) => [o, new THREE.MeshLambertMaterial({
+    map: m.map, color: m.color, vertexColors: m.vertexColors, transparent: m.transparent, opacity: m.opacity,
+    alphaTest: m.alphaTest, side: m.side, depthWrite: m.depthWrite })]));
+  rows.forEach((row, y) => {
+  for (const [o, m] of (y === 0 ? unlitMats : litMats)) o.material = m;
+  views.forEach((view, x) => {
+    marks.visible = view !== 'battle';
+    if (view === 'battle') {
+      // Behind and above the near spot, looking past it at the far one.
+      camera.fov = 45;
+      camera.position.set(near.x + 0.12 * D, near.y + 0.2 * D, near.z - 0.32 * D);
+      const t = near.clone().lerp(far, 0.55);
+      camera.lookAt(t.x, t.y + 0.6, t.z);
+    } else if (view === 'overview') {
+      camera.fov = 50;
+      const R = Math.max(size.x, size.z) * 0.5;
+      const r = Math.max(6, Math.min(R, (meta.radius || D) * 3));
+      camera.position.set(r * 1.1, r * 0.9, -r * 1.1);
+      camera.lookAt(0, 0, 0);
+    } else {
+      camera.fov = 40;
+      const r = Math.max(5, (meta.radius || D) * 1.25);
+      camera.position.set(0, r / Math.tan(THREE.MathUtils.degToRad(20)), -0.001);
+      camera.lookAt(0, 0, 0);
+    }
+    camera.updateProjectionMatrix();
+    const py = (rows.length - 1 - y) * H;
+    renderer.setViewport(x * W, py, W, H);
+    renderer.setScissor(x * W, py, W, H);
+    renderer.render(scene, camera);
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.style.left = `${x * W + 6}px`;
+    label.style.top = `${y * H + 6}px`;
+    label.textContent = x === 0 ? `${meta.id} · ${meta.name ?? ''} · ${view} · ${row}` : view;
+    sheet.appendChild(label);
+  });
+  });
+  let tris = 0;
+  arena.traverse((o) => { if (o.isMesh) tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3; });
+  window.result = { tris, box: { min: box.min.toArray(), max: box.max.toArray() } };
+</script>
+</body>
+</html>

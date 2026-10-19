@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The battle-model converter. It compiles PokeModelExporter's engine-independent library
+       (github.com/GoldenCarrotMLP/PokeModelExporter, cloned at a pinned commit by the workflow into
+       $(PmeRoot)) together with our own code: loose-folder input, the SwSh/LGPE (GFBMDL) reader,
+       battle clip selection, normalisation and the report. PME's own files are not modified. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>eggyconv</AssemblyName>
+    <RootNamespace>Eggy.Conv</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <NoWarn>CS0436;CS0162;CS0168;CS0219;CS8981</NoWarn>
+    <PmeRoot Condition="'$(PmeRoot)' == ''">$(MSBuildThisFileDirectory)../vendor/pme</PmeRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(PmeRoot)/Runtime/**/*.cs" Link="pme/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

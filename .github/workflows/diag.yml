@@ -1,0 +1,244 @@
+name: Diagnose
+
+# Reads before deciding: what the p1 sprite pack holds, how every model id would be sourced, what a few
+# models carry beyond their GLB (materials, textures by channel, visibility and material tracks, Arceus's
+# material table) with diagnostic review rows, and what the Unity path makes of Brilliant Diamond /
+# Shining Pearl bundles. Everything lands on the m1-diag pre-release.
+#
+# Jobs that run third-party code (MEGA, 7z, converters, AssetStudio, FBX2glTF, Chrome) can only read the
+# repo; only the last job, which runs nothing but gh on the artifacts, can write a release.
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: Ids to convert with diagnostics (regex)
+        default: '^(pikachu|lucario|charizard|rattata|arceus|gengar|unown)$'
+      bdsp:
+        description: BDSP dex numbers to try through the Unity path (regex on file paths)
+        default: 'pm0165|pm0351'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diag
+  cancel-in-progress: false
+
+env:
+  PME_REPO: https://github.com/GoldenCarrotMLP/PokeModelExporter.git
+  PME_SHA: 84ec1e58c0fbb9a0dc7a2bf36b618e853ae2328a
+  MEGA_CACHE: ${{ github.workspace }}/cache
+  ASM_URL: https://github.com/aelurum/AssetStudio/releases/download/v0.19.0/AssetStudioModCLI_net9_linux64.zip
+  FBX2GLTF_URL: https://github.com/godotengine/FBX2glTF/releases/download/v0.13.1/FBX2glTF-linux-x86_64.zip
+
+jobs:
+  p1:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: What the p1 pack holds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p work/p1 diag
+          gh release download p1-676c10ec -D work/p1
+          cat work/p1/pkmn-p1-676c10ec.tar.* > work/p1.tar
+          sha256sum work/p1.tar
+          tar tf work/p1.tar > diag/p1-listing.txt
+          wc -l diag/p1-listing.txt
+          grep -v '\.webp$\|\.mp3$\|\.ogg$\|\.m4a$' diag/p1-listing.txt | head -40
+          sed 's|^[^/]*/||' diag/p1-listing.txt | cut -d/ -f1 | sort | uniq -c
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diag-p1
+          path: diag/
+
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/cd
+          key: mega-cd-${{ github.run_id }}
+          restore-keys: mega-cd-
+      - name: Plan every id
+        run: |
+          mkdir -p diag
+          node pipeline/ids.mjs species/p1-ids.json work/ids.json
+          node pipeline/plan.mjs work/ids.json work/plan.json --shards 16
+          node -e '
+            const p = require("./work/plan.json");
+            const rows = p.jobs.map((j) => [j.id, j.dex, j.ff, j.src ?? "-", j.folder ?? "-", j.shiny ? "shiny" : "", (j.entries ?? []).length, Math.round((j.entries ?? []).reduce((n, e) => n + e.csize, 0) / 1e3) + " KB", j.error ?? ""].join("\t"));
+            require("fs").writeFileSync("diag/plan.tsv", rows.join("\n") + "\n");
+          '
+          cp work/ids.json diag/
+          curl -fsSL https://play.pokemonshowdown.com/data/pokedex.json -o diag/showdown-pokedex.json
+      - uses: actions/cache/save@v4
+        if: hashFiles('cache/.dirty') != ''
+        with:
+          path: cache/cd
+          key: mega-cd-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diag-plan
+          path: |
+            diag/
+            work/plan.json
+
+  models:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: PokeModelExporter at a pinned commit
+        run: |
+          git init -q vendor/pme
+          git -C vendor/pme fetch -q --depth 1 "$PME_REPO" "$PME_SHA"
+          git -C vendor/pme checkout -q FETCH_HEAD
+      - run: dotnet build conv/EggyConv.csproj -c Release -o work/conv --nologo -clp:ErrorsOnly
+      - uses: actions/download-artifact@v4
+        with:
+          name: diag-plan
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/cd
+          key: mega-cd-${{ github.run_id }}
+          restore-keys: mega-cd-
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/entries
+          key: mega-diag-${{ github.run_id }}
+          restore-keys: mega-diag-
+      - name: Fetch, convert with diagnostics, optimise, draw
+        run: |
+          rm -f cache/.dirty
+          node pipeline/fetch-entries.mjs work/plan.json work --only '${{ inputs.models }}'
+          dotnet work/conv/eggyconv.dll work/jobs.json work/raw --debug work/debug --diag work/diag
+          node pipeline/optimize.mjs work/raw out work/review
+          RENDER_VARIANTS=1 node pipeline/render.mjs out work/review work/renders work/raw || true
+          mkdir -p diag && cp work/renders/*.jpg work/raw/*.json work/diag/* diag/ 2>/dev/null || true
+          ls diag | head -100
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('cache/.dirty') != ''
+        with:
+          path: cache/entries
+          key: mega-diag-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diag-models
+          path: diag/
+
+  bdsp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/bdsp
+          key: bdsp-src-${{ github.run_id }}
+          restore-keys: bdsp-src-
+      - name: Fetch BDSP-Poke.7z from MEGA
+        id: get
+        run: |
+          rm -f cache/bdsp/.dirty
+          node pipeline/arenas/get.mjs BDSP-Poke.7z cache/bdsp
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('cache/bdsp/.dirty') != ''
+        with:
+          path: cache/bdsp
+          key: bdsp-src-${{ github.run_id }}
+      - name: List, extract the asked species, run the Unity path
+        run: |
+          mkdir -p diag work/bdsp work/fbx work/glb tools
+          a="${{ steps.get.outputs.file }}"
+          7z l "$a" > diag/bdsp-listing.txt
+          tail -3 diag/bdsp-listing.txt
+          grep -E '${{ inputs.bdsp }}' diag/bdsp-listing.txt | head -60
+          awk '{print $NF}' diag/bdsp-listing.txt | grep '/' | awk -F/ '{OFS="/"; NF=NF>4?4:NF; print}' | sort | uniq -c | sort -rn | head -40
+          inc=()
+          for k in $(echo '${{ inputs.bdsp }}' | tr '|' ' '); do inc+=("-ir!*${k}*"); done
+          7z x -y -bd -owork/bdsp "$a" "${inc[@]}" > /dev/null
+          find work/bdsp -type f | head -80
+          curl -fsSL "$ASM_URL" -o tools/asm.zip && unzip -q tools/asm.zip -d tools/asm
+          curl -fsSL "$FBX2GLTF_URL" -o tools/fbx.zip && unzip -q tools/fbx.zip -d tools/fbx
+          find tools -maxdepth 3 -type f | head -40
+          cli=$(find tools/asm -name 'AssetStudioModCLI*' -type f | grep -v '\.dll$\|\.json$\|\.pdb$' | head -1)
+          chmod +x "$cli" $(find tools/fbx -type f -name 'FBX2glTF*')
+          "$cli" --help > diag/asm-help.txt 2>&1 || true
+          cat diag/asm-help.txt
+          "$cli" work/bdsp -m info > diag/asm-info.txt 2>&1 || true
+          head -80 diag/asm-info.txt
+          "$cli" work/bdsp -m animator -o work/fbx > diag/asm-animator.txt 2>&1 || true
+          tail -40 diag/asm-animator.txt
+          find work/fbx -type f | head -60
+          fbx=$(find tools/fbx -type f -name 'FBX2glTF*' | head -1)
+          for f in $(find work/fbx -name '*.fbx'); do
+            n=$(basename "$f" .fbx)
+            "$fbx" --binary --input "$f" --output "work/glb/$n" > "diag/fbx2gltf-$n.txt" 2>&1 || true
+          done
+          find work/glb -type f
+          node pipeline/bdsp/inspect.mjs $(find work/glb -name '*.glb') > diag/bdsp-glb.txt 2>&1 || true
+          head -150 diag/bdsp-glb.txt
+          cp $(find work/glb -name '*.glb' | head -4) diag/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diag-bdsp
+          path: diag/
+
+  publish:
+    needs: [p1, plan, models, bdsp]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - name: Put everything on the m1-diag pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p pub
+          find art -type f -not -name 'plan.json' -exec cp -n {} pub/ \;
+          cp art/diag-plan/work/plan.json pub/ 2>/dev/null || true
+          (cd pub && gzip -k plan.json showdown-pokedex.json p1-listing.txt bdsp-listing.txt 2>/dev/null; rm -f plan.json showdown-pokedex.json p1-listing.txt bdsp-listing.txt; sha256sum * > SHA256SUMS)
+          ls pub | wc -l
+          gh release view m1-diag >/dev/null 2>&1 || gh release create m1-diag --prerelease --title "m1 diagnostics" --notes "What the sources hold, read before deciding how to convert them."
+          for a in $(gh release view m1-diag --json assets -q '.assets[].name'); do gh release delete-asset m1-diag "$a" -y; done
+          gh release upload m1-diag pub/* --clobber

@@ -1,0 +1,167 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Review sheet</title>
+<style>
+  html, body { margin: 0; background: #2b2f36; font: 600 15px/1.2 system-ui, sans-serif; color: #e8eaed; }
+  #sheet { position: relative; }
+  .label { position: absolute; padding: 4px 7px; background: #0009; border-radius: 4px; }
+  #title { position: absolute; right: 10px; bottom: 8px; background: #0009; padding: 4px 8px; border-radius: 4px; }
+</style>
+<script type="importmap">
+  { "imports": { "three": "/three/build/three.module.js", "three/addons/": "/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="sheet"></div>
+<script type="module">
+  // Renders one GLB the way the game's three.js will: every battle clip at a telling moment, from the
+  // front (+Z), the side (+X) and close on the face. Also measures the pose so the page can be checked.
+  import * as THREE from 'three';
+  import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+  import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+  const q = new URLSearchParams(location.search);
+  const url = q.get('model');
+  const meta = JSON.parse(q.get('meta') || '{}');
+  const CELL = 300;
+  const cols = ['idle', 'appear', 'cry', 'physical', 'special', 'hit', 'faint', 'blink'];
+  // ?variants=1 adds face rows that each change one thing, to tell what a look comes from: three's default
+  // culling of skinned meshes (bounds from the first pose drawn), no normal maps, no AO, and the
+  // game's stage material (Lambert, metalness dropped).
+  const variants = q.get('variants') === '1';
+  const rows = ['front', 'side', 'face', ...(variants ? ['face culled', 'face no normal map', 'face no AO', 'face Lambert'] : [])];
+
+  const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+  const gltf = await loader.loadAsync(url);
+  const model = gltf.scene;
+  // Skinned meshes are drawn whatever their pose: three culls them by the bounds of the first pose it
+  // drew, which hides small parts (eyes) once a clip moves them away from there.
+  const meshList = [];
+  model.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; meshList.push(o); } });
+  const original = new Map(meshList.map((m) => [m, m.material]));
+  function look(kind) {
+    for (const m of meshList) {
+      const base = original.get(m);
+      m.frustumCulled = kind !== 'face culled';
+      if (kind === 'face no normal map' || kind === 'face no AO') {
+        const c = base.clone();
+        if (kind === 'face no normal map') c.normalMap = null;
+        else c.aoMap = null;
+        m.material = c;
+      } else if (kind === 'face Lambert' && base.isMeshStandardMaterial) {
+        m.material = new THREE.MeshLambertMaterial({ map: base.map, color: base.color, emissive: base.emissive, emissiveMap: base.emissiveMap,
+          normalMap: base.normalMap, aoMap: base.aoMap, alphaTest: base.alphaTest, transparent: base.transparent, side: base.side });
+      } else m.material = base;
+    }
+  }
+  const clips = Object.fromEntries(gltf.animations.map((c) => [c.name, c]));
+  const shown = cols.filter((c) => clips[c]);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  renderer.setPixelRatio(1);
+  renderer.setSize(CELL * shown.length, CELL * rows.length);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.NeutralToneMapping; // keeps hue and saturation, to judge the materials
+  renderer.setScissorTest(true);
+  document.getElementById('sheet').appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x3a3f47);
+  scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+  scene.environmentIntensity = 0.5;
+  const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+  sun.position.set(1.5, 3, 2.5);
+  scene.add(sun, new THREE.HemisphereLight(0xdde6ff, 0x404040, 0.5));
+  const floor = new THREE.Mesh(new THREE.CircleGeometry(0.9, 48), new THREE.MeshStandardMaterial({ color: 0x555b66 }));
+  floor.rotation.x = -Math.PI / 2;
+  scene.add(floor, model);
+
+  const mixer = new THREE.AnimationMixer(model);
+  const box = new THREE.Box3();
+  const times = {
+    idle: () => 0,
+    appear: (c) => c.duration * 0.6,
+    cry: (c) => c.duration * 0.5,
+    physical: (c) => meta.hit?.physical ?? c.duration * 0.5,
+    special: (c) => meta.hit?.special ?? c.duration * 0.5,
+    hit: (c) => c.duration * 0.4,
+    faint: (c) => c.duration,
+    blink: (c) => c.duration * 0.5,
+  };
+  // blink is an overlay: it is shown playing over idle, as the game would use it.
+  function pose(name, t) {
+    mixer.stopAllAction();
+    for (const n of name === 'blink' ? ['idle', 'blink'] : [name]) {
+      const clip = clips[n];
+      const action = mixer.clipAction(clip);
+      action.reset().play();
+      action.time = n === name ? Math.min(t ?? times[n](clip), clip.duration) : 0;
+    }
+    mixer.update(0);
+    model.updateMatrixWorld(true);
+  }
+
+  // Measurements: the idle pose's box (should be height 1, feet on 0, centred), every clip's box.
+  const result = { clips: {}, url };
+  for (const name of shown) {
+    pose(name);
+    box.setFromObject(model, true);
+    const r = (v) => Math.round(v * 1000) / 1000;
+    result.clips[name] = { t: r(clips[name].duration), min: box.min.toArray().map(r), max: box.max.toArray().map(r), finite: [...box.min.toArray(), ...box.max.toArray()].every(Number.isFinite) };
+  }
+  // The box the idle loop sweeps: the converter normalised it to height 1 standing on y = 0.
+  const env = new THREE.Box3();
+  for (let i = 0; i <= 12; i++) {
+    pose('idle', (clips.idle.duration * i) / 12);
+    env.union(box.setFromObject(model, true));
+  }
+  result.idleEnvelope = { min: env.min.toArray().map((v) => Math.round(v * 1000) / 1000), max: env.max.toArray().map((v) => Math.round(v * 1000) / 1000) };
+  let tris = 0, meshes = 0;
+  model.traverse((o) => { if (o.isMesh) { meshes++; tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3; } });
+  result.meshes = meshes;
+  result.tris = tris;
+
+  const camera = new THREE.PerspectiveCamera(30, 1, 0.01, 50);
+  const sheet = document.getElementById('sheet');
+  shown.forEach((name, x) => {
+    pose(name);
+    box.setFromObject(model, true);
+    const c = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    // The face: centred on the eyes (meshes whose material is named "eye"), else the top of the model.
+    const eyes = new THREE.Box3();
+    model.traverse((o) => { if (o.isMesh && /eye/i.test(o.material?.name ?? '')) eyes.union(new THREE.Box3().setFromObject(o, true)); });
+    rows.forEach((row, y) => {
+      look(row);
+      let target = new THREE.Vector3(0, 0.5, 0), dist = 3.4;
+      if (row.startsWith('face')) {
+        target = eyes.isEmpty() ? new THREE.Vector3(c.x, box.min.y + size.y * 0.78, c.z) : eyes.getCenter(new THREE.Vector3());
+        dist = 0.95;
+      }
+      const dir = row === 'side' ? new THREE.Vector3(1, 0.18, 0) : new THREE.Vector3(0, 0.12, 1);
+      camera.position.copy(target).addScaledVector(dir.normalize(), dist);
+      camera.lookAt(target);
+      const px = x * CELL, py = (rows.length - 1 - y) * CELL;
+      renderer.setViewport(px, py, CELL, CELL);
+      renderer.setScissor(px, py, CELL, CELL);
+      renderer.render(scene, camera);
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.style.left = `${x * CELL + 6}px`;
+      label.style.top = `${y * CELL + 6}px`;
+      label.textContent = y === 0 ? `${name} ${clips[name].duration.toFixed(2)}s` : row;
+      sheet.appendChild(label);
+    });
+    look('face');
+  });
+  const title = document.createElement('div');
+  title.id = 'title';
+  title.textContent = `${meta.id ?? url} · ${meta.src ?? ''} ${meta.folder ?? ''} · ${tris} tris`;
+  sheet.appendChild(title);
+  window.result = result;
+</script>
+</body>
+</html>
