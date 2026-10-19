@@ -333,6 +333,7 @@ namespace Eggy.Conv
             public string Role;           // how the game draws it (extras.role): water, glow, fog, decal
             public Vector3 Water = new Vector3(0.2f, 0.45f, 0.6f); // the stage's sea colour, for rock feet
             public bool LeafDetail;       // leaf cards: shading from the cut-out's own strokes
+            public Slot Noise;            // a ground blend's noise (BlendTex): the second layer cuts in where its weight passes it
         }
 
         static Slot MakeSlot(GfMat m, string sampler, int set, string xf)
@@ -425,6 +426,9 @@ namespace Eggy.Conv
                 k.Base = MakeSlot(m, "Ground00Tex01", m.In("Ground00UVset"), null);
                 k.Overlay = MakeSlot(m, "Ground01Tex01", m.In("Ground01UVset"), null);
                 k.OverlayWeight = (mesh, v) => mesh.Col != null ? mesh.Col[v].W : 0;
+                // The field's two grounds meet along a noise (BlendTex), not along the triangles' vertex weights:
+                // per pixel, the second ground shows where its weight passes the noise.
+                k.Noise = MakeSlot(m, "BlendTex", m.In("Ground01UVset"), null);
             }
             else if (g.StartsWith("FieldCliffShader"))
             {
@@ -462,6 +466,7 @@ namespace Eggy.Conv
             var bt = k.Base != null ? store.Get(k.Base.Tex) : null;
             if (bt == null) { k.Drop = true; k.Note = $"no colour texture ({k.Base?.Tex})"; return k; }
             if (k.Overlay != null && store.Get(k.Overlay.Tex) == null) k.Overlay = null;
+            if (k.Noise != null && (k.Overlay == null || store.Get(k.Noise.Tex) == null)) k.Noise = null;
             if (k.Product != null && store.Get(k.Product.Tex) == null) k.Product = null;
             k.Baked.RemoveAll(b => b.Slot == null || store.Get(b.Slot.Tex) == null);
             if (m.Sw("DiscardEnable")) { k.Alpha = "MASK"; float d = m.Fl("DiscardValuie"); k.Cutoff = d > 0.01f && d < 0.99f ? d : 0.5f; }
@@ -681,6 +686,7 @@ namespace Eggy.Conv
         }
 
         static float R(float v) => MathF.Round(v, 3);
+        const float NoiseCut = 0.05f;
 
         // One submesh (a GF mesh's polygons of one material) as its own glTF mesh, compacted, with its
         // texture coordinates already in glTF's space (transform applied, V from the top).
@@ -771,13 +777,14 @@ namespace Eggy.Conv
             if (b.Maps.ContainsKey(matName)) return;
             var md2 = new MaterialData { Name = matName, Shader = m.Group };
             b.Model.Materials.Add(md2);
-            var mapping = new MaterialMapping { Roughness = 1, DoubleSided = k.DoubleSided, AlphaBlend = (k.Alpha == "BLEND" && !ground) || overlay };
+            var noise = overlay ? k.Noise : null;
+            var mapping = new MaterialMapping { Roughness = 1, DoubleSided = k.DoubleSided, AlphaBlend = (k.Alpha == "BLEND" && !ground) || (overlay && noise == null) };
             if (k.Factor != Vector4.One) mapping.BaseColorFactor = new[] { k.Factor.X, k.Factor.Y, k.Factor.Z, k.Factor.W };
             if (slot != null)
             {
                 bool alphaOnly = k.AlphaOnly && !overlay && !ground;
                 var product = overlay || ground ? null : k.Product;
-                string key = slot.Tex + (alphaOnly ? "_shape" : "") + (product != null ? "_x_" + product.Tex : "") + ".png";
+                string key = slot.Tex + (alphaOnly ? "_shape" : "") + (product != null ? "_x_" + product.Tex : "") + (noise != null ? "_cut_" + noise.Tex : "") + ".png";
                 if (!b.Textures.ContainsKey(key))
                 {
                     var tex = store.Get(slot.Tex);
@@ -814,6 +821,20 @@ namespace Eggy.Conv
                                 px[o] = (byte)(px[o] * p2.X); px[o + 1] = (byte)(px[o + 1] * p2.Y); px[o + 2] = (byte)(px[o + 2] * p2.Z);
                             }
                     }
+                    if (noise != null)
+                    {
+                        // Alpha c / max(n, c) against a cutoff of c: weight x alpha passes the cutoff exactly where
+                        // the weight passes the noise n (and everywhere for n under c).
+                        var nt = store.Get(noise.Tex);
+                        px = (byte[])px.Clone();
+                        for (int y = 0; y < tex.H; y++)
+                            for (int x = 0; x < tex.W; x++)
+                            {
+                                var uv = new Vector2((x + 0.5f) / tex.W, 1 - (y + 0.5f) / tex.H);
+                                float n = Sample(nt, (uv - slot.Translate) / slot.Scale * noise.Scale + noise.Translate, noise.WrapU, noise.WrapV).X;
+                                px[(y * tex.W + x) * 4 + 3] = (byte)Math.Round(255 * Math.Clamp(NoiseCut / Math.Max(n, NoiseCut), 0, 1));
+                            }
+                    }
                     b.Textures[key] = Png.Encode(px, tex.W, tex.H);
                 }
                 mapping.BaseColorTexture = key;
@@ -827,8 +848,9 @@ namespace Eggy.Conv
                 ["base"] = slot?.Tex,
                 ["uvSet"] = slot?.Set,
                 ["wrap"] = slot != null ? new JsonArray(GlWrap(slot.WrapU), GlWrap(slot.WrapV)) : null,
-                ["alpha"] = overlay ? "BLEND" : ground && k.Alpha == "BLEND" ? "OPAQUE" : k.Alpha,
-                ["cutoff"] = k.Alpha == "MASK" ? (JsonNode)k.Cutoff : null,
+                ["alpha"] = overlay ? (noise != null ? "MASK" : "BLEND") : ground && k.Alpha == "BLEND" ? "OPAQUE" : k.Alpha,
+                ["cutoff"] = overlay && noise != null ? (JsonNode)NoiseCut : k.Alpha == "MASK" && !overlay ? (JsonNode)k.Cutoff : null,
+                ["noise"] = noise?.Tex,
                 ["overlay"] = overlay,
                 ["ground"] = ground,
                 ["baked"] = new JsonArray(k.Baked.Select(x => (JsonNode)$"{x.Mode} {x.Slot.Tex} (uv{x.Slot.Set})").ToArray()),
