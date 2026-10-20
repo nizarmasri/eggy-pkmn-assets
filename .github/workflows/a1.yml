@@ -67,6 +67,11 @@ jobs:
         run: |
           rm -f cache/.dirty
           node pipeline/arenas/research.mjs research cache
+      - name: A sample of the only camera animations there are (Legends Z-A's cutscenes), decoded from their bytes
+        run: |
+          node pipeline/arenas/cameras.mjs work/cameras cache
+          cp work/za-cameras-sample.tsv research/
+          dotnet work/conv/eggyconv.dll --inspect work/cameras research/za-cameras-inventory.json
       - uses: actions/cache/save@v4
         if: always() && hashFiles('cache/.dirty') != ''
         with:

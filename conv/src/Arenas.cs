@@ -514,7 +514,9 @@ namespace Eggy.Conv
             if (!water02 && k.Role != "fog" && k.Role != "glow") return;
             var v1 = new Vector2(m.Fl("Tex01_Translate_U"), m.Fl("Tex01_Translate_V"));
             var v2 = new Vector2(m.Fl("Tex02_Translate_U"), m.Fl("Tex02_Translate_V"));
-            if (!water02 && v1 == Vector2.Zero && v2 == Vector2.Zero) return;
+            // Fog always drifts (Lorelei's and Bruno's rings sit under an animated group with no offset saved); a glow
+            // the file gives no offset stays still (lamps, panels).
+            if (!water02 && k.Role != "fog" && v1 == Vector2.Zero && v2 == Vector2.Zero) return;
             Slot mask = null;
             if (m.Maps.TryGetValue("Texture02", out var t2) && store.Get(t2.Tex) != null)
             {
@@ -529,7 +531,8 @@ namespace Eggy.Conv
             k.Moves = true;
             if (v1 == Vector2.Zero && v2 == Vector2.Zero)
             {
-                // Saved before the animation ran (the blue-rock and ice caves' fog): the layers' way is not in the file.
+                // Saved before the animation ran (the blue-rock and ice caves' fog, Lorelei's and Bruno's): the layers'
+                // way is not in the file.
                 k.Dir1 = Vector2.UnitX; k.Dir2 = mask != null ? -Vector2.UnitX : Vector2.Zero;
                 k.MotionNote = "direction chosen (the file's offsets are zero)";
             }
@@ -814,7 +817,8 @@ namespace Eggy.Conv
                 if (entry["role"] != null || entry["overlay"]?.GetValue<bool>() == true || entry["ground"]?.GetValue<bool>() == true) continue;
                 string name = entry["name"].GetValue<string>();
                 string group = entry["group"]?.GetValue<string>() ?? "";
-                string what = (name + " " + (entry["base"]?.GetValue<string>() ?? "")).ToLowerInvariant();
+                // The material's own name and texture, not the part's ("F_grass:sea03_com1" is a shore strip).
+                string what = (name.Substring(name.IndexOf(':') + 1) + " " + (entry["base"]?.GetValue<string>() ?? "")).ToLowerInvariant();
                 if (name.StartsWith("sky:") || what.Contains("sky") || what.Contains("cloud")) { entry["role"] = "sky"; continue; }
                 if (entry["box"] is not JsonArray bx || bx.Count < 6 || bx[4].GetValue<float>() - bx[1].GetValue<float>() > 8f) continue;
                 bool cutout = (entry["alpha"]?.GetValue<string>() ?? "OPAQUE") != "OPAQUE";
