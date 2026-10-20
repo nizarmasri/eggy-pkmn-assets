@@ -1,0 +1,121 @@
+name: Build the a1 arena pack
+
+# The Let's Go battle maps as their own pack, so they can change without the models downloading again:
+# release a1-<hash> (pkmn-a1-<hash>.tar in 10 MiB parts, arenas.lock.json for eggy, every file on its own) and
+# the a1-<hash>-review pre-release (each arena from the battle camera, its fog and light cards over black, the
+# list of what moves). research: what the PokéModels folder holds beside the maps (battle cameras included)
+# and an inventory of the maps from their bytes, on the a1-research pre-release.
+#
+# Every job that runs third-party code (MEGA, 7z, PokeModelExporter, Chrome) can only read the repo. Only the
+# publish job can write, and it runs nothing but gh on the artifacts.
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: research (the archive and the maps' inventory) or build (the pack)
+        type: choice
+        options: [build, research]
+        default: build
+      publish:
+        description: Publish the releases
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a1
+  cancel-in-progress: false
+
+env:
+  PME_REPO: https://github.com/GoldenCarrotMLP/PokeModelExporter.git
+  PME_SHA: 84ec1e58c0fbb9a0dc7a2bf36b618e853ae2328a
+  MEGA_CACHE: ${{ github.workspace }}/cache
+  # Two of the live models, for scale on the review sheets.
+  MODELS: https://github.com/nizarmasri/eggy-pkmn-assets/releases/download/m1-8802f814
+
+jobs:
+  research:
+    if: inputs.stage == 'research'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: PokeModelExporter at a pinned commit, and the converter
+        run: |
+          git init -q vendor/pme
+          git -C vendor/pme fetch -q --depth 1 "$PME_REPO" "$PME_SHA"
+          git -C vendor/pme checkout -q FETCH_HEAD
+          dotnet build conv/EggyConv.csproj -c Release -o work/conv --nologo -clp:ErrorsOnly
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/cd
+          key: mega-cd-${{ github.run_id }}
+          restore-keys: mega-cd-
+      - name: Every archive's directory, searched for battle cameras and the maps' other files
+        run: |
+          rm -f cache/.dirty
+          node pipeline/arenas/research.mjs research cache
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('cache/.dirty') != ''
+        with:
+          path: cache/cd
+          key: mega-cd-${{ github.run_id }}
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/arenas
+          key: arenas-src-${{ github.run_id }}
+          restore-keys: arenas-src-
+      - name: Fetch LGPE-BattleMaps.7z from MEGA
+        id: get
+        run: |
+          rm -f cache/arenas/.dirty
+          node pipeline/arenas/get.mjs LGPE-BattleMaps.7z cache/arenas
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('cache/arenas/.dirty') != ''
+        with:
+          path: cache/arenas
+          key: arenas-src-${{ github.run_id }}
+      - name: The battle maps from their bytes
+        run: |
+          7z t "${{ steps.get.outputs.file }}" | tail -2
+          7z x -y -bd -owork/src "${{ steps.get.outputs.file }}" > /dev/null
+          7z l -slt "${{ steps.get.outputs.file }}" > research/battlemaps-listing.txt
+          find work/src -type f | sed 's|.*\.||' | sort | uniq -c | sort -rn | tee research/battlemaps-extensions.txt
+          dotnet work/conv/eggyconv.dll --inspect work/src research/battlemaps-inventory.json
+          gzip -f research/battlemaps-inventory.json
+          (cd research && sha256sum $(ls | grep -v SHA256SUMS) > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: research
+          path: research/
+
+  publish-research:
+    needs: research
+    if: inputs.publish && needs.research.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: research
+          path: research
+      - name: Put the findings on the a1-research pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view a1-research >/dev/null 2>&1 || gh release create a1-research --prerelease --latest=false --title "a1 research" --notes "What the PokéModels folder holds beside the Let's Go battle maps (battle cameras included), and an inventory of the maps from their bytes. Not part of any pack."
+          gh release upload a1-research research/* --clobber
