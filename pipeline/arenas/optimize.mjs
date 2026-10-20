@@ -24,6 +24,44 @@ const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies(
   'meshopt.decoder': MeshoptDecoder,
 });
 
+// A mask is an image no material slot uses, so the writer gives it no glTF texture: here it gets one (a sampler
+// with the mask's wraps), and each material's extras.mask names that texture's index in place of the file.
+function injectMasks(glb) {
+  const jsonLen = glb.readUInt32LE(12);
+  const json = JSON.parse(glb.toString('utf8', 20, 20 + jsonLen));
+  const rest = glb.subarray(20 + jsonLen);
+  const masked = (json.materials ?? []).filter((m) => m.extras?.mask?.file);
+  if (masked.length === 0) return glb;
+  json.textures ??= [];
+  json.samplers ??= [];
+  // The masks are WebP, as every other texture of the arena is (EXT_texture_webp).
+  json.extensionsUsed ??= [];
+  if (!json.extensionsUsed.includes('EXT_texture_webp')) json.extensionsUsed.push('EXT_texture_webp');
+  const made = new Map();
+  for (const m of masked) {
+    const { file, wrap, ...mask } = m.extras.mask;
+    const key = `${file} ${wrap?.join(',')}`;
+    if (!made.has(key)) {
+      const image = (json.images ?? []).findIndex((im) => im.name === `mask:${file}`);
+      if (image < 0) throw new Error(`mask image ${file} is not in the GLB`);
+      json.samplers.push({ magFilter: 9729, minFilter: 9987, wrapS: wrap?.[0] ?? 10497, wrapT: wrap?.[1] ?? 10497 });
+      json.textures.push({ sampler: json.samplers.length - 1, name: `mask:${file}`, extensions: { EXT_texture_webp: { source: image } } });
+      made.set(key, json.textures.length - 1);
+    }
+    m.extras.mask = { texture: made.get(key), ...mask };
+  }
+  let text = JSON.stringify(json);
+  while (Buffer.byteLength(text) % 4) text += ' ';
+  const head = Buffer.alloc(20);
+  const body = Buffer.from(text);
+  head.writeUInt32LE(0x46546c67, 0);
+  head.writeUInt32LE(2, 4);
+  head.writeUInt32LE(20 + body.length + rest.length, 8);
+  head.writeUInt32LE(body.length, 12);
+  head.writeUInt32LE(0x4e4f534a, 16);
+  return Buffer.concat([head, body, rest]);
+}
+
 fs.mkdirSync(outDir, { recursive: true });
 const arenas = {};
 const report = {};
@@ -55,8 +93,15 @@ for (const spec of list.arenas) {
       if (info && p.wrap) info.setWrapS(p.wrap[0]).setWrapT(p.wrap[1]);
     }
     if (tex) (mat.getName().replace(/^hull /, '').startsWith('N_') ? nearTex : farOnly).add(tex);
-    // How the game draws it (material.userData.role): water, glow, fog or decal; nothing for the rest.
-    mat.setExtras(p?.role ? { role: p.role } : {});
+    // How the game draws it (material.userData): its role (water, glow, fog, decal, foliage, sky), how its colour
+    // texture scrolls, the mask multiplied into its alpha (its texture index is filled in once the GLB is
+    // written: see injectMasks) and the water's drift. Nothing for the rest.
+    const x = {};
+    if (p?.role) x.role = p.role;
+    if (p?.scroll) x.scroll = p.scroll;
+    if (p?.mask) x.mask = { file: p.mask.file, texCoord: p.mask.texCoord, ...(p.mask.scroll ? { scroll: p.mask.scroll } : {}), wrap: p.mask.wrap };
+    if (p?.water?.flow) x.water = { flow: p.water.flow };
+    mat.setExtras(x);
   }
   for (const t of nearTex) farOnly.delete(t);
   // Vertex colours: the converter keeps them under an application name; they are plain COLOR_0 here.
@@ -84,7 +129,14 @@ for (const spec of list.arenas) {
     quantize({ quantizationVolume: 'scene', quantizePosition: 16 }),
   );
   doc.createExtension(EXTMeshoptCompression).setRequired(true).setEncoderOptions({ method: EXTMeshoptCompression.EncoderMethod.QUANTIZE });
-  const glb = Buffer.from(await io.writeBinary(doc));
+  // The masks' images, added after prune (no material slot holds them, so prune would drop them).
+  const maskFiles = [...new Set(root.listMaterials().map((m) => m.getExtras()?.mask?.file).filter(Boolean))];
+  for (const file of maskFiles) {
+    const png = fs.readFileSync(path.join(rawDir, `${spec.id}--${file}`));
+    const webp = await sharp(png).resize({ width: 512, height: 512, fit: 'inside', withoutEnlargement: true }).webp({ quality: 85, effort: 6 }).toBuffer();
+    doc.createTexture(`mask:${file}`).setImage(webp).setMimeType('image/webp');
+  }
+  const glb = injectMasks(Buffer.from(await io.writeBinary(doc)));
   fs.writeFileSync(path.join(outDir, `${spec.id}.glb`), glb);
 
   const sha256 = crypto.createHash('sha256').update(glb).digest('hex');

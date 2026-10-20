@@ -119,3 +119,158 @@ jobs:
         run: |
           gh release view a1-research >/dev/null 2>&1 || gh release create a1-research --prerelease --latest=false --title "a1 research" --notes "What the PokéModels folder holds beside the Let's Go battle maps (battle cameras included), and an inventory of the maps from their bytes. Not part of any pack."
           gh release upload a1-research research/* --clobber
+
+  arenas:
+    if: inputs.stage == 'build'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: PokeModelExporter at a pinned commit, and the converter
+        run: |
+          git init -q vendor/pme
+          git -C vendor/pme fetch -q --depth 1 "$PME_REPO" "$PME_SHA"
+          git -C vendor/pme checkout -q FETCH_HEAD
+          dotnet build conv/EggyConv.csproj -c Release -o work/conv --nologo -clp:ErrorsOnly
+      - uses: actions/cache/restore@v4
+        with:
+          path: cache/arenas
+          key: arenas-src-${{ github.run_id }}
+          restore-keys: arenas-src-
+      - name: Fetch LGPE-BattleMaps.7z from MEGA
+        id: get
+        run: |
+          rm -f cache/arenas/.dirty
+          node pipeline/arenas/get.mjs LGPE-BattleMaps.7z cache/arenas
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('cache/arenas/.dirty') != ''
+        with:
+          path: cache/arenas
+          key: arenas-src-${{ github.run_id }}
+      - name: Check, extract, convert, optimise
+        run: |
+          7z t "${{ steps.get.outputs.file }}" | tail -2
+          7z x -y -bd -owork/src "${{ steps.get.outputs.file }}" > /dev/null
+          dotnet work/conv/eggyconv.dll --arenas work/src/background work/raw pipeline/arenas/b0.json
+          node pipeline/arenas/optimize.mjs work/raw arenas pipeline/arenas/b0.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arenas
+          path: arenas/
+
+  # Each arena from the battle camera with two of the live models on its spots for scale, and its fog and glow
+  # cards alone over black at two moments.
+  review:
+    needs: arenas
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pipeline/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: pipeline
+      - uses: actions/download-artifact@v4
+        with:
+          name: arenas
+          path: arenas
+      - name: Draw
+        run: |
+          mkdir -p work/pkmn
+          curl -fsSL "$MODELS/pikachu.glb" -o work/pkmn/pikachu.glb
+          curl -fsSL "$MODELS/snorlax.glb" -o work/pkmn/snorlax.glb
+          curl -fsSL "$MODELS/models.json" -o work/all-models.json
+          node -e '
+            const fs = require("fs"), all = JSON.parse(fs.readFileSync("work/all-models.json", "utf8")).models;
+            fs.writeFileSync("work/pkmn/models.json", JSON.stringify({ v: 1, models: { pikachu: all.pikachu, snorlax: all.snorlax } }));
+          '
+          node pipeline/arenas/render.mjs arenas work/renders work/pkmn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: renders
+          path: work/renders/
+
+  pack:
+    needs: [arenas, review]
+    if: always() && needs.arenas.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      pack: ${{ steps.pack.outputs.pack }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: arenas
+          path: work/arenas
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: renders
+          path: work/renders
+      - name: The pack, its parts, its lock, the release layout
+        id: pack
+        run: node pipeline/arenas/pack.mjs --arenas work/arenas --renders work/renders --work work/pack --rel rel
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-main
+          path: rel/main/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-review
+          path: rel/review/
+
+  publish:
+    needs: pack
+    if: inputs.publish && needs.pack.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: rel
+      - name: Publish a1-<hash> and its review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PACK: ${{ needs.pack.outputs.pack }}
+        run: |
+          set -euo pipefail
+          case "$PACK" in a1-????????) ;; *) echo "not a pack id: $PACK"; exit 1 ;; esac
+          make() {
+            local tag=$1 dir=$2 pre=$3 text=$4
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              {
+                echo "Built by run ${{ github.run_id }} from commit ${{ github.sha }}. $text"
+                echo
+                echo 'Fetch with `node fetch.mjs --tag '"$tag"' --out <dir>` (segmented, resumable, checked against SHA256SUMS).'
+              } > notes.md
+              gh release create "$tag" $pre --latest=false --title "$tag" --notes-file notes.md
+            fi
+            ls "$dir" | split -l 50 - batch.
+            for b in batch.*; do (cd "$dir" && gh release upload "$tag" $(cat "../../$b") --clobber); done
+            rm -f batch.*
+          }
+          make "$PACK" rel/release-main "" "The Let's Go arenas on their own: the tarball in 10 MiB parts (pkmn-$PACK.tar.NN), arenas.lock.json for eggy, arenas.json and every <id>.glb."
+          make "$PACK-review" rel/release-review "--prerelease" "Review sheets for $PACK: each arena from the battle camera, its fog and glow cards over black at t = 0 and 3 s, and motion.md (what moves, which cards fade at their edges)."
+          gh release view "$PACK" --json assets --jq '.assets | length'

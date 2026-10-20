@@ -52,9 +52,18 @@ for (const [id, a] of Object.entries(arenas)) {
     await page.waitForFunction(() => window.result, null, { timeout: 240000 });
     const result = await page.evaluate(() => window.result);
     await page.locator('#sheet').screenshot({ path: path.join(rendersDir, `${id}.jpg`), type: 'jpeg', quality: 80 });
+    // The fog and glow cards alone over black, at t = 0 and 3 s: their edges, and how far they have moved.
+    if (result.roles?.fog || result.roles?.glow) {
+      const cards = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+      cards.on('pageerror', (e) => errors.push(`cards: ${e.message}`));
+      await cards.goto(`http://127.0.0.1:${port}/render/arena.html?mode=cards&model=/out/${a.file}&meta=${encodeURIComponent(JSON.stringify(meta))}`);
+      await cards.waitForFunction(() => window.result, null, { timeout: 240000 });
+      await cards.locator('#sheet').screenshot({ path: path.join(rendersDir, `${id}-cards.jpg`), type: 'jpeg', quality: 85 });
+      await cards.close();
+    }
     checks[id] = { ...result, errors };
     if (errors.length) bad++;
-    console.log(`${id}: ${errors.length ? `PROBLEMS ${errors.join('; ')}` : 'ok'} (${result.tris} tris)`);
+    console.log(`${id}: ${errors.length ? `PROBLEMS ${errors.join('; ')}` : 'ok'} (${result.tris} tris, ${result.motion?.length ?? 0} moving materials)`);
   } catch (e) {
     bad++;
     checks[id] = { errors: [...errors, e.message] };

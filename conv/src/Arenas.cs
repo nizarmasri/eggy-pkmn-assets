@@ -6,6 +6,7 @@ using System.Numerics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization.Metadata;
+using System.Text.RegularExpressions;
 using PokeModelExporter.Export;
 using PokeModelExporter.Formats;
 using PokeModelExporter.Model;
@@ -334,6 +335,16 @@ namespace Eggy.Conv
             public Vector3 Water = new Vector3(0.2f, 0.45f, 0.6f); // the stage's sea colour, for rock feet
             public bool LeafDetail;       // leaf cards: shading from the cut-out's own strokes
             public Slot Noise;            // a ground blend's noise (BlendTex): the second layer cuts in where its weight passes it
+            // Motion (Motion()): which way each texture layer runs, in GF UV (V up), as the material's TexNN_Translate
+            // has them; the speeds are set per material from its UV density (SetSpeeds()).
+            public bool Moves;
+            public Vector2 Dir1, Dir2;    // Texture01's and the mask's direction (zero: still)
+            public float Speed;           // metres per second the faster layer runs at
+            public string MotionNote;
+            public Slot Mask;             // a second texture the game multiplies into alpha, on its own UV set
+            public Vector2? Scroll, MaskScroll; // glTF UV units per second (V down)
+            public Vector2[] WaterLayers; // FieldWaterShader01's tex01..tex03 values, as the file has them
+            public float[] WaterFlow;     // the water's drift in the arena's metres per second (x, z)
         }
 
         static Slot MakeSlot(GfMat m, string sampler, int set, string xf)
@@ -459,6 +470,10 @@ namespace Eggy.Conv
                 k.DoubleSided = true;
                 k.Role = "water";
                 k.Note = "water: flat Base_Color1, translucent (the game draws its own water look)";
+                // Its three scrolling layers (net, light, normal map): tex01..tex03, the offsets the game's animation
+                // had reached when the file was written (the open sea's are one frame's worth; see SetSpeeds).
+                var layers = new[] { "tex01", "tex02", "tex03" }.Select(t => new Vector2(m.Fl(t + "_U"), m.Fl(t + "_V"))).ToArray();
+                if (layers.Any(v => v != Vector2.Zero)) k.WaterLayers = layers;
                 return k;
             }
             else { k.Base = MakeSlot(m, "Texture01", 0, "Tex01"); k.Note = "unknown shader group, drawn with Texture01"; }
@@ -478,8 +493,134 @@ namespace Eggy.Conv
             string names = (m.Name + " " + k.Base.Tex).ToLowerInvariant();
             if (names.Contains("fog")) { k.Role = "fog"; if (k.Alpha == "OPAQUE") k.Alpha = "BLEND"; }
             else if (m.In("PreMultiplieMode") == 1 && m.In("BlendMode") == 5) { k.Role = "glow"; k.Alpha = "BLEND"; k.UseVertexColor = true; }
-            else if (g == "FieldWaterShader02" && !names.Contains("wave") && !names.Contains("weve")) { k.Role = "fog"; k.Alpha = "BLEND"; }
+            // FieldWaterShader02 is fog unless it is water: wave sheets, and the far rings' shore strips (sea03_com, on
+            // their add_wave meshes).
+            else if (g == "FieldWaterShader02" && !names.Contains("wave") && !names.Contains("weve") && !names.Contains("sea")) { k.Role = "fog"; k.Alpha = "BLEND"; }
+            Motion(m, k, store);
             return k;
+        }
+
+        // What moves. The rip holds no animation files: the game drives these materials' texture offsets from clips
+        // it does not include, and each TexNN_Translate is where that animation had brought the layer when the file
+        // was written (two copies of one texture at mirrored offsets, ±1.001, -4.004: offsets that only mean
+        // anything as motion). So the direction of each layer, and which layers run against each other, are the
+        // game's; the speed is chosen (SetSpeeds). Moving: every FieldWaterShader02 material (fog rings, wave
+        // sheets, the Champion's and the stadium's light streaks) and the fog and glow cards of other shaders that
+        // have an offset (flames, light shafts). A second texture becomes the mask, running its own way.
+        static void Motion(GfMat m, Look k, TexStore store)
+        {
+            if (k.Base == null || k.Base.Sampler != "Texture01") return;
+            bool water02 = m.Group == "FieldWaterShader02";
+            if (!water02 && k.Role != "fog" && k.Role != "glow") return;
+            var v1 = new Vector2(m.Fl("Tex01_Translate_U"), m.Fl("Tex01_Translate_V"));
+            var v2 = new Vector2(m.Fl("Tex02_Translate_U"), m.Fl("Tex02_Translate_V"));
+            if (!water02 && v1 == Vector2.Zero && v2 == Vector2.Zero) return;
+            Slot mask = null;
+            if (m.Maps.TryGetValue("Texture02", out var t2) && store.Get(t2.Tex) != null)
+            {
+                // FieldWaterShader02's wave sheets have one UV set, so its Texture02 is on the first unless it says
+                // otherwise; the other shaders' second texture is on the second (as Decide reads them).
+                mask = MakeSlot(m, "Texture02", m.In("Tex02_UV", water02 ? 0 : 1), "Tex02");
+                mask.Translate = Vector2.Zero;
+                k.Baked.RemoveAll(b => b.Slot?.Sampler == "Texture02");
+                k.Mask = mask;
+            }
+            k.Base.Translate = Vector2.Zero;
+            k.Moves = true;
+            if (v1 == Vector2.Zero && v2 == Vector2.Zero)
+            {
+                // Saved before the animation ran (the blue-rock and ice caves' fog): the layers' way is not in the file.
+                k.Dir1 = Vector2.UnitX; k.Dir2 = mask != null ? -Vector2.UnitX : Vector2.Zero;
+                k.MotionNote = "direction chosen (the file's offsets are zero)";
+            }
+            else
+            {
+                k.Dir1 = v1; k.Dir2 = mask != null ? v2 : Vector2.Zero;
+                k.MotionNote = "direction from the file's offsets";
+            }
+            string names = (m.Name + " " + k.Base.Tex).ToLowerInvariant();
+            // Metres per second of the faster layer: drifting fog, rolling wave sheets, rising flames, shimmering light
+            // shafts, streaming effect panels.
+            k.Speed = k.Role == "fog" ? 0.25f
+                : names.Contains("wave") || names.Contains("weve") || names.Contains("sea") ? 0.35f
+                : names.Contains("fire") || names.Contains("flame") || m.Maps.Any(x => x.Value.Tex.Contains("effmask")) ? 0.8f
+                : names.Contains("light") ? 0.2f
+                : 0.5f;
+        }
+
+        // The speeds: each layer's share of the faster one's (as the file's offsets have them), over the material's
+        // own UV density, so the motion is the same in metres whatever the texture's tiling. Water: its drift.
+        static void SetSpeeds(Look k, List<GfMesh> meshes, int mat)
+        {
+            if (k.Moves)
+            {
+                float top = Math.Max(k.Dir1.Length(), k.Dir2.Length());
+                Vector2? Vel(Vector2 dir, Slot slot)
+                {
+                    if (slot == null || dir.LengthSquared() < 1e-12f) return null;
+                    var (mpu, mpv, _, _) = Density(meshes, mat, slot.Set);
+                    // Metres per unit of the slot's own (scaled) UVs.
+                    float mu = mpu / Math.Max(1e-4f, Math.Abs(slot.Scale.X)), mv = mpv / Math.Max(1e-4f, Math.Abs(slot.Scale.Y));
+                    var d = Vector2.Normalize(dir);
+                    float metresPerUv = MathF.Sqrt(mu * d.X * mu * d.X + mv * d.Y * mv * d.Y);
+                    float speed = k.Speed * dir.Length() / top / Math.Max(1e-3f, metresPerUv);
+                    // glTF's V runs from the top.
+                    return new Vector2(d.X * speed, -d.Y * speed);
+                }
+                k.Scroll = Vel(k.Dir1, k.Base);
+                k.MaskScroll = Vel(k.Dir2, k.Mask);
+            }
+            if (k.WaterLayers != null)
+            {
+                // The sea's first layer (net) as a drift of 0.15 m/s, along where its UVs run on the water's surface.
+                var v = k.WaterLayers[0];
+                if (v.LengthSquared() > 1e-12f)
+                {
+                    var (_, _, tu, tv) = Density(meshes, mat, 0);
+                    var d = Vector2.Normalize(v);
+                    var w = tu * d.X + tv * d.Y;
+                    var flat = new Vector2(w.X, w.Z);
+                    if (flat.LengthSquared() > 1e-12f)
+                    {
+                        flat = Vector2.Normalize(flat) * 0.15f;
+                        k.WaterFlow = new[] { R(flat.X), R(flat.Y) };
+                    }
+                }
+            }
+        }
+
+        // A material's UV density on one UV set: metres per UV unit along U and V (area-weighted), and the average
+        // directions U and V run in (unit vectors in the stage's frame).
+        static (float U, float V, Vector3 Tu, Vector3 Tv) Density(List<GfMesh> meshes, int mat, int set)
+        {
+            double su = 0, sv = 0, w = 0;
+            var tu = Vector3.Zero; var tv = Vector3.Zero;
+            foreach (var mesh in meshes)
+            {
+                var uv = mesh.Uv[Math.Clamp(set, 0, 2)] ?? mesh.Uv[0];
+                if (uv == null) continue;
+                foreach (var (mi, idx) in mesh.Polys)
+                {
+                    if (mi != mat) continue;
+                    for (int t = 0; t + 2 < idx.Length; t += 3)
+                    {
+                        int a = idx[t], b = idx[t + 1], c = idx[t + 2];
+                        if (a >= mesh.P.Length || b >= mesh.P.Length || c >= mesh.P.Length) continue;
+                        var e1 = mesh.P[b] - mesh.P[a]; var e2 = mesh.P[c] - mesh.P[a];
+                        var d1 = uv[b] - uv[a]; var d2 = uv[c] - uv[a];
+                        float det = d1.X * d2.Y - d2.X * d1.Y;
+                        if (Math.Abs(det) < 1e-9f) continue;
+                        var T = (e1 * d2.Y - e2 * d1.Y) / det;
+                        var B = (e2 * d1.X - e1 * d2.X) / det;
+                        float area = Vector3.Cross(e1, e2).Length() * 0.5f;
+                        if (!(area > 0) || !float.IsFinite(T.Length()) || !float.IsFinite(B.Length())) continue;
+                        su += T.Length() * area; sv += B.Length() * area; w += area;
+                        tu += Norm(T) * area; tv += Norm(B) * area;
+                    }
+                }
+            }
+            if (w <= 0) return (1, 1, Vector3.UnitX, Vector3.UnitZ);
+            return ((float)(su / w), (float)(sv / w), Norm(tu), Norm(tv));
         }
 
         // ---------------------------------------------------------------- building an arena
@@ -491,6 +632,7 @@ namespace Eggy.Conv
             public Dictionary<string, MaterialMapping> Maps = new();
             public JsonArray Plan = new();
             public List<(Vector3 A, Vector3 B, Vector3 C, int Kind, string Part)> Tris = new();
+            public Dictionary<string, byte[]> Masks = new(); // written beside the GLB as <id>--<key> for the optimiser
         }
 
         static JsonObject Build(Spec spec, ListFile list, string src, string outPath)
@@ -516,6 +658,7 @@ namespace Eggy.Conv
                 var sea = stage.Mats.FirstOrDefault(x => x.Group == "FieldWaterShader01");
                 if (sea != null && sea.C.TryGetValue("Base_Color1", out var seaColour))
                     foreach (var look in looks) look.Water = seaColour;
+                for (int mi = 0; mi < looks.Count; mi++) SetSpeeds(looks[mi], stage.Meshes, mi);
                 bool near = part.StartsWith("btl_N_");
                 for (int mi = 0; mi < stage.Mats.Count; mi++)
                 {
@@ -662,11 +805,33 @@ namespace Eggy.Conv
                         }
                 if (total > 0 && up / total > 0.9f) entry["role"] = "decal";
             }
+            // Sky domes and cloud layers, and the vegetation the game sways in the wind (nothing in the rip moves it):
+            // leaf and grass shaders' cards, and cut-out or blended cards of other shaders named for plants, up to
+            // 8 m tall (taller ones are backdrops: the forest wall, mountain sides).
+            var foliage = new JsonArray();
+            foreach (var entry in b.Plan.OfType<JsonObject>())
+            {
+                if (entry["role"] != null || entry["overlay"]?.GetValue<bool>() == true || entry["ground"]?.GetValue<bool>() == true) continue;
+                string name = entry["name"].GetValue<string>();
+                string group = entry["group"]?.GetValue<string>() ?? "";
+                string what = (name + " " + (entry["base"]?.GetValue<string>() ?? "")).ToLowerInvariant();
+                if (name.StartsWith("sky:") || what.Contains("sky") || what.Contains("cloud")) { entry["role"] = "sky"; continue; }
+                if (entry["box"] is not JsonArray bx || bx.Count < 6 || bx[4].GetValue<float>() - bx[1].GetValue<float>() > 8f) continue;
+                bool cutout = (entry["alpha"]?.GetValue<string>() ?? "OPAQUE") != "OPAQUE";
+                bool plant = Regex.IsMatch(what, "grass|bush|weed|leaf|leaves|tree|plant|flower|ivy|vine");
+                bool notPlant = Regex.IsMatch(what, "grd|gracli|cliff|mount|wall|rock|forest|fence|screen|panel|seat");
+                bool yes = group.StartsWith("FieldTreeShader")
+                    || (group.StartsWith("FieldGrassShader") && !Regex.IsMatch(what, "wall|screen|panel"))
+                    || (cutout && plant && !notPlant);
+                if (yes) { entry["role"] = "foliage"; foliage.Add(name); }
+            }
+            r["foliage"] = foliage;
 
             // ---- The GLB ----
             foreach (var m in b.Model.Materials) b.Maps[m.Name].Unlit = unlit;
             var glb = GlbWriter.Write(b.Model, b.Textures, m => b.Maps[m.Name], null);
             File.WriteAllBytes(outPath, glb);
+            foreach (var (key, png) in b.Masks) File.WriteAllBytes(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(outPath)), $"{spec.Id}--{key}"), png);
             r["lit"] = !unlit;
             r["tris"] = b.Model.Meshes.Sum(m => m.SubMeshes.Sum(s => s.Indices.Length / 3));
             r["materialCount"] = b.Model.Materials.Count;
@@ -686,6 +851,7 @@ namespace Eggy.Conv
         }
 
         static float R(float v) => MathF.Round(v, 3);
+        static float R4(float v) => MathF.Round(v, 4);
         const float NoiseCut = 0.05f;
 
         // One submesh (a GF mesh's polygons of one material) as its own glTF mesh, compacted, with its
@@ -718,6 +884,18 @@ namespace Eggy.Conv
                 if (uvs == null) return;
                 md.TexCoords.Add(order.Select(v => ToGl(uvs[v], slot)).ToArray());
             }
+            // The mask on TEXCOORD_1, under its own transform.
+            var mask = overlay || ground || slot == null ? null : k.Mask;
+            if (mask != null)
+            {
+                var muv = mesh.Uv[mask.Set] ?? mesh.Uv[0];
+                if (muv == null) mask = null;
+                else md.TexCoords.Add(order.Select(v => ToGl(muv[v], mask)).ToArray());
+            }
+            // The vertex alpha of a blended surface is its opacity (fog rings and light shafts fade to nothing at their
+            // edges, grass cards at their tips, wave sheets lie at 0.35, the sea thins out at the shore). The ground
+            // layers' alpha is their blend weight instead (the overlay copies).
+            bool vertexAlpha = !overlay && !ground && k.Alpha == "BLEND" && mesh.Col != null;
 
             // Vertex colours: the mesh's own, times what the shader multiplies in from other textures.
             var col = new Vector4[n];
@@ -728,7 +906,7 @@ namespace Eggy.Conv
                 var c = k.UseVertexColor && mesh.Col != null ? mesh.Col[v] : Vector4.One;
                 stats[0] += c.X; stats[1] += c.Y; stats[2] += c.Z; stats[3] += c.W;
                 var rgb = new Vector3(c.X, c.Y, c.Z);
-                float alpha = overlay ? Math.Clamp(k.OverlayWeight(mesh, v), 0, 1) : 1;
+                float alpha = overlay ? Math.Clamp(k.OverlayWeight(mesh, v), 0, 1) : vertexAlpha ? Math.Clamp(mesh.Col[v].W, 0, 1) : 1;
                 foreach (var (s, mode) in k.Baked)
                 {
                     var uv = mesh.Uv[s.Set] ?? mesh.Uv[0];
@@ -840,8 +1018,43 @@ namespace Eggy.Conv
                 mapping.BaseColorTexture = key;
             }
             b.Maps[matName] = mapping;
+            JsonObject maskEntry = null;
+            if (mask != null)
+            {
+                // The mask's value in every channel (its alpha where the texture has one, else its brightness: an
+                // additive streak texture is all in its colour), so a reader can take whichever channel it likes.
+                string key = "mask_" + mask.Tex + ".png";
+                if (!b.Masks.ContainsKey(key))
+                {
+                    var mt = store.Get(mask.Tex);
+                    var px = new byte[mt.Px.Length];
+                    for (int i = 0; i < px.Length; i += 4)
+                    {
+                        byte v = mt.HasAlpha ? mt.Px[i + 3] : Math.Max(mt.Px[i], Math.Max(mt.Px[i + 1], mt.Px[i + 2]));
+                        px[i] = px[i + 1] = px[i + 2] = px[i + 3] = v;
+                    }
+                    b.Masks[key] = Png.Encode(px, mt.W, mt.H);
+                }
+                maskEntry = new JsonObject
+                {
+                    ["file"] = key,
+                    ["tex"] = mask.Tex,
+                    ["texCoord"] = 1,
+                    ["wrap"] = new JsonArray(GlWrap(mask.WrapU), GlWrap(mask.WrapV)),
+                    ["scroll"] = k.MaskScroll is Vector2 ms ? new JsonArray(R4(ms.X), R4(ms.Y)) : null,
+                };
+            }
+            bool own = !overlay && !ground;
             b.Plan.Add(new JsonObject
             {
+                ["scroll"] = own && k.Scroll is Vector2 sc ? new JsonArray(R4(sc.X), R4(sc.Y)) : null,
+                ["mask"] = maskEntry,
+                ["motion"] = own && k.Moves ? $"{k.MotionNote}; {k.Speed} m/s chosen" : null,
+                ["water"] = own && k.Role == "water" && (k.WaterLayers != null || k.WaterFlow != null) ? new JsonObject
+                {
+                    ["flow"] = k.WaterFlow != null ? new JsonArray(k.WaterFlow[0], k.WaterFlow[1]) : null,
+                    ["layers"] = k.WaterLayers != null ? new JsonArray(k.WaterLayers.Select(v => (JsonNode)new JsonArray(R4(v.X), R4(v.Y))).ToArray()) : null,
+                } : null,
                 ["name"] = matName,
                 ["group"] = m.Group,
                 ["shader"] = m.Shader,

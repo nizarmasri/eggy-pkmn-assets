@@ -28,20 +28,51 @@
 
   const q = new URLSearchParams(location.search);
   const meta = JSON.parse(q.get('meta') || '{}');
+  // mode=cards: only the fog and glow cards, over black, at two moments (their soft edges, and how they move).
+  const cards = q.get('mode') === 'cards';
   const BW = 1600, BH = 900, SW = 800, SH = 450;
   const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
   const gltf = await loader.loadAsync(q.get('model'));
   const arena = gltf.scene;
   const roles = {};
+  // What moves (extras: scroll on the colour texture's UVs, a mask on its own UVs with its own scroll), set for a
+  // moment t by at(t): the texture is sampled at uv + scroll × t.
+  const moving = [];
+  const masks = new Map();
+  const mats = new Set();
+  arena.traverse((o) => { if (o.isMesh) mats.add(o.material); });
+  for (const m of mats) {
+    const x = m.userData ?? {};
+    if (x.mask) {
+      if (!masks.has(x.mask.texture)) masks.set(x.mask.texture, gltf.parser.getDependency('texture', x.mask.texture));
+      const t = (await masks.get(x.mask.texture)).clone();
+      t.channel = x.mask.texCoord ?? 1;
+      t.needsUpdate = true;
+      m.alphaMap = t;
+      m.transparent = true;
+      m.needsUpdate = true;
+    }
+    if ((x.scroll && m.map) || (x.mask?.scroll && m.alphaMap)) {
+      if (m.map && x.scroll) { m.map = m.map.clone(); m.map.needsUpdate = true; }
+      moving.push({ m, scroll: x.scroll, maskScroll: x.mask?.scroll });
+    }
+  }
+  const at = (t) => {
+    for (const { m, scroll, maskScroll } of moving) {
+      if (scroll && m.map) m.map.offset.set(scroll[0] * t, scroll[1] * t);
+      if (maskScroll && m.alphaMap) m.alphaMap.offset.set(maskScroll[0] * t, maskScroll[1] * t);
+    }
+  };
   arena.traverse((o) => {
     if (!o.isMesh) return;
     o.frustumCulled = false;
     const m = o.material, role = m.userData?.role;
+    if (cards && role !== 'fog' && role !== 'glow') { o.visible = false; return; }
     if (!role) return;
     roles[role] = (roles[role] ?? 0) + 1;
     if (role === 'water') o.renderOrder = -1;
     if (role === 'glow') Object.assign(m, { blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
-    if (role === 'fog') { m.opacity *= 0.45; m.transparent = true; m.depthWrite = false; }
+    if (role === 'fog') { if (!cards) m.opacity *= 0.45; m.transparent = true; m.depthWrite = false; }
     if (role === 'decal') Object.assign(m, { polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4, depthWrite: false });
     if (role === 'decal' && !m.transparent) o.renderOrder = 1;
   });
@@ -85,7 +116,7 @@
 
   // Pokémon for scale: normalised to height 1, scaled by models.json height; near faces +Z (toward far).
   for (const [who, where, turn] of [[q.get('near'), 'near', 0], [q.get('far'), 'far', Math.PI]]) {
-    if (!who || !s.singles) continue;
+    if (!who || !s.singles || cards) continue;
     const [file, height] = who.split('@');
     const g = await loader.loadAsync(file);
     g.scene.scale.setScalar(Number(height));
@@ -173,14 +204,24 @@
   const D = Math.max(near.distanceTo(far), 2);
   const sheet = document.getElementById('sheet');
   const camera = new THREE.PerspectiveCamera(40, 16 / 9, 0.05, 4000);
-  const views = [
-    { view: 'battle', x: 0, y: 0, w: BW, h: BH },
-    { view: 'overview', x: 0, y: BH, w: SW, h: SH },
-    { view: 'top', x: SW, y: BH, w: SW, h: SH },
-  ];
+  const views = cards
+    ? [
+        { view: 'battle', t: 0, x: 0, y: 0, w: SW, h: SH },
+        { view: 'battle', t: 3, x: SW, y: 0, w: SW, h: SH },
+        { view: 'overview', t: 0, x: 0, y: SH, w: SW, h: SH },
+        { view: 'overview', t: 3, x: SW, y: SH, w: SW, h: SH },
+      ]
+    : [
+        { view: 'battle', t: 0, x: 0, y: 0, w: BW, h: BH },
+        { view: 'overview', t: 0, x: 0, y: BH, w: SW, h: SH },
+        { view: 'top', t: 0, x: SW, y: BH, w: SW, h: SH },
+      ];
+  if (cards) renderer.setSize(BW, 2 * SH);
+  const sheetH = cards ? 2 * SH : BH + SH;
   let centreHits = [];
-  for (const { view, x, y, w, h } of views) {
-    marks.visible = view !== 'battle';
+  for (const { view, t, x, y, w, h } of views) {
+    at(t);
+    marks.visible = view !== 'battle' && !cards;
     camera.aspect = w / h;
     if (view === 'battle') {
       const shot = battleShot(near, far, w / h);
@@ -220,7 +261,7 @@
       camera.lookAt(0, 0, 0);
     }
     camera.updateProjectionMatrix();
-    const py = BH + SH - y - h;
+    const py = sheetH - y - h;
     renderer.setViewport(x, py, w, h);
     renderer.setScissor(x, py, w, h);
     renderer.render(scene, camera);
@@ -228,12 +269,14 @@
     label.className = 'label';
     label.style.left = `${x + 6}px`;
     label.style.top = `${y + 6}px`;
-    label.textContent = view === 'battle' ? `${meta.id} · ${meta.name ?? ''} · battle camera` : view;
+    const name = view === 'battle' ? `${meta.id} · ${meta.name ?? ''} · battle camera` : view;
+    label.textContent = cards ? `${name} · fog and glow cards only · t = ${t} s` : name;
     sheet.appendChild(label);
   }
   let tris = 0;
   arena.traverse((o) => { if (o.isMesh) tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3; });
-  window.result = { tris, roles, box: { min: box.min.toArray(), max: box.max.toArray() }, centreHits };
+  const motion = [...mats].filter((m) => m.userData?.scroll || m.userData?.mask || m.userData?.water).map((m) => ({ material: m.name, ...m.userData }));
+  window.result = { tris, roles, box: { min: box.min.toArray(), max: box.max.toArray() }, centreHits, motion, animations: gltf.animations.map((a) => a.name) };
 </script>
 </body>
 </html>
